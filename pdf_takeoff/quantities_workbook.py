@@ -1,8 +1,8 @@
-"""Gera a planilha de quantidades/orçamento no mesmo formato usado pelo estimador:
+"""Gera a planilha de quantidades/orçamento no formato usado pelo estimador:
 agrupada por tipo de forro (Fireline, Aqualine, Standard...) e altura de parede,
-com 3 taxas por linha (GIB, Stopping, Pintura) em $/m², tabela de preços
-(Custo x margem = Venda) e uma aba Resumo com GIB/Plaster/Painting/Total,
-Margem, P&G e Contingência — espelhando a estrutura de referência do usuário.
+com 3 taxas por linha (GIB, Stopping, Pintura) em $/m² puxadas de uma aba
+"Taxas" única (preço de venda por m², sem tabela por espessura de chapa) e uma
+aba Resumo com GIB/Plaster/Painting/Total, Margem e Contingência.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _SECTION_FILL = PatternFill("solid", fgColor="D9E1F2")
+_INPUT_FILL = PatternFill("solid", fgColor="FFF2CC")
 _HEADER_FONT = Font(color="FFFFFF", bold=True)
 _BOLD = Font(bold=True)
 
-# Colunas fixas da aba "Quantities" (iguais em espírito ao arquivo de referência).
+# Colunas fixas da aba "Quantities".
 COL_DESC = 1  # A
 COL_QTY = 2  # B
 COL_QTY_UNIT = 3  # C
@@ -33,27 +34,32 @@ COL_STOP_TOTAL = 12  # L
 COL_PAINT_RATE = 14  # N
 COL_PAINT_TOTAL = 15  # O
 COL_ROW_TOTAL = 17  # Q
-COL_SALE_LABEL = 19  # S
-COL_SALE_RATE = 20  # T
-COL_COST_LABEL = 22  # V
-COL_COST_RATE = 23  # W
 
-
-@dataclass
-class RateEntry:
-    label: str
-    cost_rate: float  # $/m² (ou $/m, ou $/unidade, conforme o item)
+# Endereços fixos da aba "Taxas" (ver add_rates_sheet).
+TAXAS_PAINTING = "'Taxas'!$C$5"
+TAXAS_STOPPING = "'Taxas'!$C$6"
+TAXAS_GIB_INSTALL = "'Taxas'!$C$7"
+TAXAS_BOARD_COST = "'Taxas'!$C$10"
+TAXAS_BOARD_WIDTH = "'Taxas'!$C$11"
+TAXAS_BOARD_HEIGHT = "'Taxas'!$C$12"
+TAXAS_BOARD_AREA = "'Taxas'!$C$13"
+TAXAS_BOARD_COST_M2 = "'Taxas'!$C$14"
+TAXAS_GIB_TOTAL_M2 = "'Taxas'!$C$16"
+TAXAS_CORNER = "'Taxas'!$C$20"
+TAXAS_SEALANT = "'Taxas'!$C$21"
+TAXAS_SKIRTING_PAINT = "'Taxas'!$C$22"
+TAXAS_SINGLE_DOOR = "'Taxas'!$C$23"
+TAXAS_DOUBLE_DOOR = "'Taxas'!$C$24"
 
 
 @dataclass
 class LiningItem:
     description: str  # ex.: "1x 10mm Standard", "2x 19mm Fireline"
     qty: float  # metros lineares de parede com esse tipo de forro
-    qty_unit: str  # 'm' (linear) ou 'ea' (contagem, p.ex. cantoneiras)
-    rate_label: str  # rótulo na tabela de preços (GIB) a referenciar
-    layers: int = 1  # multiplicador de camada (1 = single layer, 2 = double layer)
-    stop_rate_label: str | None = "STOPPING LV4"
-    paint_rate_label: str | None = "PAINTING"
+    qty_unit: str = "m"  # 'm' (linear)
+    layers: int = 1  # 1 = single layer, 2 = double layer (dobra o custo de Gib)
+    include_stopping: bool = True
+    include_painting: bool = True
     total_unit: str = "m2"
 
 
@@ -70,36 +76,15 @@ class HeightGroup:
 class CeilingItem:
     description: str  # ex.: "13mm Standard Gib board (C1)"
     area_m2: float
-    rate_label: str
-    stop_rate_label: str | None = "SQUARE STOP"
-    paint_rate_label: str | None = "PAINTING"
+    include_stopping: bool = True
+    include_painting: bool = True
 
 
 @dataclass
 class DoorPaintItem:
     description: str  # ex.: "D1 - Single Swing"
     count: int
-    rate_label: str  # "Single Door" ou "Double Door"
-
-
-DEFAULT_RATE_TABLE: list[RateEntry] = [
-    RateEntry("10mm STANDARD", 0.0),
-    RateEntry("10mm AQUALINE", 0.0),
-    RateEntry("13mm STANDARD", 0.0),
-    RateEntry("13mm AQUALINE", 0.0),
-    RateEntry("13mm FIRELINE", 0.0),
-    RateEntry("13mm NOISELINE", 0.0),
-    RateEntry("16mm FIRELINE", 0.0),
-    RateEntry("19mm Fireline", 0.0),
-    RateEntry("GIB Sealant", 0.0),
-    RateEntry("STOPPING LV4", 0.0),
-    RateEntry("SQUARE STOP", 0.0),
-    RateEntry("CORNER BEADS", 0.0),
-    RateEntry("Painting Skirting", 0.0),
-    RateEntry("PAINTING", 0.0),
-    RateEntry("Single Door", 0.0),
-    RateEntry("Double Door", 0.0),
-]
+    door_type: str = "single"  # "single" ou "double"
 
 
 def _style_header(ws: Worksheet, row: int, cols: list[int]) -> None:
@@ -122,50 +107,88 @@ class QuantitiesWorkbookBuilder:
     totais de categoria para depois alimentar a aba 'Resumo' por fórmula.
     """
 
-    def __init__(self, building_name: str = "BUILDING 01", subcontractor_margin: float = 0.25):
+    def __init__(self, building_name: str = "BUILDING 01"):
         self.wb = Workbook()
         self.ws = self.wb.active
         self.ws.title = "Quantities"
         self.building_name = building_name
-        self.subcontractor_margin = subcontractor_margin
-        self._rate_rows: dict[str, int] = {}
         self._gib_total_cells: list[str] = []
         self._stop_total_cells: list[str] = []
         self._paint_total_cells: list[str] = []
         self._row = 1
 
-    # -- tabela de preços (lado direito) -------------------------------------
-    def _write_rate_table(self, rates: list[RateEntry]) -> None:
-        ws = self.ws
-        ws.cell(row=9, column=COL_SALE_LABEL, value="SALE - RATES").font = _BOLD
-        ws.cell(row=9, column=COL_COST_LABEL, value="COST - RATES").font = _BOLD
-        ws.cell(row=7, column=18, value="Subcontractor Margin").font = _BOLD
-        margin_cell = f"${get_column_letter(19)}$7"
-        ws.cell(row=7, column=19, value=self.subcontractor_margin).number_format = "0%"
+    # -- aba "Taxas": único lugar onde os preços de venda são preenchidos ----
+    def add_rates_sheet(
+        self,
+        painting_rate: float,
+        stopping_rate: float,
+        gib_install_rate: float,
+        board_cost: float,
+        board_width_m: float = 1.2,
+        board_height_m: float = 2.4,
+        corner_trim_rate: float = 0.0,
+        sealant_rate: float = 0.0,
+        skirting_paint_rate: float = 0.0,
+        single_door_rate: float = 0.0,
+        double_door_rate: float = 0.0,
+    ) -> None:
+        ws = self.wb.create_sheet("Taxas", 0)
+        ws.cell(row=2, column=2, value="Taxas de Venda por m² (preencha aqui)").font = Font(bold=True, size=13)
 
-        r = 11
-        for entry in rates:
-            ws.cell(row=r, column=COL_SALE_LABEL, value=entry.label)
-            ws.cell(
-                row=r,
-                column=COL_SALE_RATE,
-                value=f"={get_column_letter(COL_COST_RATE)}{r}*(1+{margin_cell})",
-            ).number_format = "0.00"
-            ws.cell(row=r, column=COL_COST_LABEL, value=entry.label)
-            ws.cell(row=r, column=COL_COST_RATE, value=entry.cost_rate).number_format = "0.00"
-            self._rate_rows[entry.label] = r
-            r += 1
+        ws.cell(row=4, column=2, value="Trabalho").font = _BOLD
+        ws.cell(row=4, column=3, value="Valor").font = _BOLD
+        for r, label, value, fmt in (
+            (5, "Pintura ($/m²)", painting_rate, "0.00"),
+            (6, "Reboco / Stopping ($/m²)", stopping_rate, "0.00"),
+            (7, "Instalação de Gib - mão de obra ($/m²)", gib_install_rate, "0.00"),
+        ):
+            ws.cell(row=r, column=2, value=label)
+            cell = ws.cell(row=r, column=3, value=value)
+            cell.number_format = fmt
+            cell.fill = _INPUT_FILL
 
-        for col, width in ((COL_SALE_LABEL, 18), (COL_SALE_RATE, 11), (COL_COST_LABEL, 18), (COL_COST_RATE, 11)):
-            ws.column_dimensions[get_column_letter(col)].width = width
+        ws.cell(row=9, column=2, value="Chapa de Gib").font = _BOLD
+        input_rows = [
+            (10, "Custo da chapa ($)", board_cost, "0.00", True),
+            (11, "Largura da chapa (m)", board_width_m, "0.00", True),
+            (12, "Altura da chapa (m)", board_height_m, "0.00", True),
+        ]
+        for r, label, value, fmt, is_input in input_rows:
+            ws.cell(row=r, column=2, value=label)
+            cell = ws.cell(row=r, column=3, value=value)
+            cell.number_format = fmt
+            if is_input:
+                cell.fill = _INPUT_FILL
 
-    def _sale_ref(self, label: str, multiplier: int = 1) -> str:
-        row = self._rate_rows[label]
-        cell = f"{get_column_letter(COL_SALE_RATE)}{row}"
-        return f"={multiplier}*{cell}" if multiplier != 1 else f"={cell}"
+        ws.cell(row=13, column=2, value="Área da chapa (m²)")
+        ws.cell(row=13, column=3, value=f"={TAXAS_BOARD_WIDTH}*{TAXAS_BOARD_HEIGHT}").number_format = "0.00"
 
-    # -- cabeçalho ----------------------------------------------------------
-    def start(self, rates: list[RateEntry]) -> None:
+        ws.cell(row=14, column=2, value="Custo da chapa por m² ($/m²)")
+        ws.cell(row=14, column=3, value=f"={TAXAS_BOARD_COST}/{TAXAS_BOARD_AREA}").number_format = "0.00"
+
+        ws.cell(row=16, column=2, value="Total Gib por m² (instalação + chapa)").font = _BOLD
+        total_cell = ws.cell(row=16, column=3, value=f"={TAXAS_GIB_INSTALL}+{TAXAS_BOARD_COST_M2}")
+        total_cell.number_format = "0.00"
+        total_cell.font = _BOLD
+
+        ws.cell(row=19, column=2, value="Outros itens").font = _BOLD
+        for r, label, value in (
+            (20, "Cantoneira / Corner trim ($/m)", corner_trim_rate),
+            (21, "Selante / Sealant ($/m)", sealant_rate),
+            (22, "Pintura de rodapé - Skirting ($/m)", skirting_paint_rate),
+            (23, "Porta simples - Single door ($/porta)", single_door_rate),
+            (24, "Porta dupla - Double door ($/porta)", double_door_rate),
+        ):
+            ws.cell(row=r, column=2, value=label)
+            cell = ws.cell(row=r, column=3, value=value)
+            cell.number_format = "0.00"
+            cell.fill = _INPUT_FILL
+
+        ws.column_dimensions["B"].width = 40
+        ws.column_dimensions["C"].width = 14
+
+    # -- cabeçalho da aba Quantities ------------------------------------------
+    def start(self) -> None:
         ws = self.ws
         ws.cell(row=self._row, column=1, value=self.building_name).font = Font(bold=True, size=13)
         header_row = self._row + 1
@@ -193,8 +216,55 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=col_row, column=col, value=text)
         _style_header(ws, col_row, list(labels.keys()))
 
-        self._write_rate_table(rates)
         self._row = col_row + 1
+
+    def _write_total(self, r: int, qty_col: int = COL_QTY, mult_col: int = COL_HEIGHT) -> None:
+        ws = self.ws
+        ws.cell(
+            row=r, column=COL_TOTAL,
+            value=f"={get_column_letter(qty_col)}{r}*{get_column_letter(mult_col)}{r}",
+        ).number_format = "0"
+
+    def _write_row_total(self, r: int) -> None:
+        ws = self.ws
+        ws.cell(
+            row=r, column=COL_ROW_TOTAL,
+            value=(
+                f"=SUM({get_column_letter(COL_GIB_TOTAL)}{r},"
+                f"{get_column_letter(COL_STOP_TOTAL)}{r},"
+                f"{get_column_letter(COL_PAINT_TOTAL)}{r})"
+            ),
+        ).number_format = "0.00"
+
+    def _write_gib(self, r: int, rate_formula: str) -> None:
+        ws = self.ws
+        gib_rate_cell = f"{get_column_letter(COL_GIB_RATE)}{r}"
+        ws.cell(row=r, column=COL_GIB_RATE, value=rate_formula).number_format = "0.00"
+        ws.cell(
+            row=r, column=COL_GIB_TOTAL,
+            value=f"={get_column_letter(COL_TOTAL)}{r}*{gib_rate_cell}",
+        ).number_format = "0.00"
+        self._gib_total_cells.append(f"{get_column_letter(COL_GIB_TOTAL)}{r}")
+
+    def _write_stopping(self, r: int, rate_formula: str) -> None:
+        ws = self.ws
+        stop_rate_cell = f"{get_column_letter(COL_STOP_RATE)}{r}"
+        ws.cell(row=r, column=COL_STOP_RATE, value=rate_formula).number_format = "0.00"
+        ws.cell(
+            row=r, column=COL_STOP_TOTAL,
+            value=f"={get_column_letter(COL_TOTAL)}{r}*{stop_rate_cell}",
+        ).number_format = "0.00"
+        self._stop_total_cells.append(f"{get_column_letter(COL_STOP_TOTAL)}{r}")
+
+    def _write_painting(self, r: int, rate_formula: str) -> None:
+        ws = self.ws
+        paint_rate_cell = f"{get_column_letter(COL_PAINT_RATE)}{r}"
+        ws.cell(row=r, column=COL_PAINT_RATE, value=rate_formula).number_format = "0.00"
+        ws.cell(
+            row=r, column=COL_PAINT_TOTAL,
+            value=f"={get_column_letter(COL_TOTAL)}{r}*{paint_rate_cell}",
+        ).number_format = "0.00"
+        self._paint_total_cells.append(f"{get_column_letter(COL_PAINT_TOTAL)}{r}")
 
     # -- seção de forros de parede por altura ------------------------------
     def add_height_group(self, group: HeightGroup) -> None:
@@ -209,46 +279,16 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=item.qty)
             ws.cell(row=r, column=COL_QTY_UNIT, value=item.qty_unit)
             ws.cell(row=r, column=COL_HEIGHT, value=group.height_m)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value=item.total_unit)
 
-            gib_rate_cell = f"{get_column_letter(COL_GIB_RATE)}{r}"
-            ws.cell(row=r, column=COL_GIB_RATE, value=self._sale_ref(item.rate_label, item.layers)).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_GIB_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{gib_rate_cell}",
-            ).number_format = "0.00"
-            self._gib_total_cells.append(f"{get_column_letter(COL_GIB_TOTAL)}{r}")
-
-            if item.stop_rate_label:
-                stop_rate_cell = f"{get_column_letter(COL_STOP_RATE)}{r}"
-                ws.cell(row=r, column=COL_STOP_RATE, value=self._sale_ref(item.stop_rate_label)).number_format = "0.00"
-                ws.cell(
-                    row=r, column=COL_STOP_TOTAL,
-                    value=f"={get_column_letter(COL_TOTAL)}{r}*{stop_rate_cell}",
-                ).number_format = "0.00"
-                self._stop_total_cells.append(f"{get_column_letter(COL_STOP_TOTAL)}{r}")
-
-            if item.paint_rate_label:
-                paint_rate_cell = f"{get_column_letter(COL_PAINT_RATE)}{r}"
-                ws.cell(row=r, column=COL_PAINT_RATE, value=self._sale_ref(item.paint_rate_label)).number_format = "0.00"
-                ws.cell(
-                    row=r, column=COL_PAINT_TOTAL,
-                    value=f"={get_column_letter(COL_TOTAL)}{r}*{paint_rate_cell}",
-                ).number_format = "0.00"
-                self._paint_total_cells.append(f"{get_column_letter(COL_PAINT_TOTAL)}{r}")
-
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL,
-                value=(
-                    f"=SUM({get_column_letter(COL_GIB_TOTAL)}{r},"
-                    f"{get_column_letter(COL_STOP_TOTAL)}{r},"
-                    f"{get_column_letter(COL_PAINT_TOTAL)}{r})"
-                ),
-            ).number_format = "0.00"
+            gib_formula = f"={item.layers}*{TAXAS_GIB_TOTAL_M2}" if item.layers != 1 else f"={TAXAS_GIB_TOTAL_M2}"
+            self._write_gib(r, gib_formula)
+            if item.include_stopping:
+                self._write_stopping(r, f"={TAXAS_STOPPING}")
+            if item.include_painting:
+                self._write_painting(r, f"={TAXAS_PAINTING}")
+            self._write_row_total(r)
             self._row += 1
 
         if group.corner_trims_qty:
@@ -257,21 +297,10 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=group.corner_trims_qty)
             ws.cell(row=r, column=COL_QTY_UNIT, value="ea")
             ws.cell(row=r, column=COL_HEIGHT, value=group.height_m)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m")
-            stop_rate_cell = f"{get_column_letter(COL_STOP_RATE)}{r}"
-            ws.cell(row=r, column=COL_STOP_RATE, value=self._sale_ref("CORNER BEADS")).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_STOP_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{stop_rate_cell}",
-            ).number_format = "0.00"
-            self._stop_total_cells.append(f"{get_column_letter(COL_STOP_TOTAL)}{r}")
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_STOP_TOTAL)}{r}"
-            ).number_format = "0.00"
+            self._write_stopping(r, f"={TAXAS_CORNER}")
+            ws.cell(row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_STOP_TOTAL)}{r}").number_format = "0.00"
             self._row += 1
 
         if group.sealant_qty:
@@ -280,21 +309,10 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=group.sealant_qty)
             ws.cell(row=r, column=COL_QTY_UNIT, value="m")
             ws.cell(row=r, column=COL_HEIGHT, value=2)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m")
-            gib_rate_cell = f"{get_column_letter(COL_GIB_RATE)}{r}"
-            ws.cell(row=r, column=COL_GIB_RATE, value=self._sale_ref("GIB Sealant")).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_GIB_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{gib_rate_cell}",
-            ).number_format = "0.00"
-            self._gib_total_cells.append(f"{get_column_letter(COL_GIB_TOTAL)}{r}")
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_GIB_TOTAL)}{r}"
-            ).number_format = "0.00"
+            self._write_gib(r, f"={TAXAS_SEALANT}")
+            ws.cell(row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_GIB_TOTAL)}{r}").number_format = "0.00"
             self._row += 1
 
     # -- seção de tetos -------------------------------------------------------
@@ -310,46 +328,15 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=item.area_m2)
             ws.cell(row=r, column=COL_QTY_UNIT, value="m²")
             ws.cell(row=r, column=COL_HEIGHT, value=1)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m2")
 
-            gib_rate_cell = f"{get_column_letter(COL_GIB_RATE)}{r}"
-            ws.cell(row=r, column=COL_GIB_RATE, value=self._sale_ref(item.rate_label)).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_GIB_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{gib_rate_cell}",
-            ).number_format = "0.00"
-            self._gib_total_cells.append(f"{get_column_letter(COL_GIB_TOTAL)}{r}")
-
-            if item.stop_rate_label:
-                stop_rate_cell = f"{get_column_letter(COL_STOP_RATE)}{r}"
-                ws.cell(row=r, column=COL_STOP_RATE, value=self._sale_ref(item.stop_rate_label)).number_format = "0.00"
-                ws.cell(
-                    row=r, column=COL_STOP_TOTAL,
-                    value=f"={get_column_letter(COL_TOTAL)}{r}*{stop_rate_cell}",
-                ).number_format = "0.00"
-                self._stop_total_cells.append(f"{get_column_letter(COL_STOP_TOTAL)}{r}")
-
-            if item.paint_rate_label:
-                paint_rate_cell = f"{get_column_letter(COL_PAINT_RATE)}{r}"
-                ws.cell(row=r, column=COL_PAINT_RATE, value=self._sale_ref(item.paint_rate_label)).number_format = "0.00"
-                ws.cell(
-                    row=r, column=COL_PAINT_TOTAL,
-                    value=f"={get_column_letter(COL_TOTAL)}{r}*{paint_rate_cell}",
-                ).number_format = "0.00"
-                self._paint_total_cells.append(f"{get_column_letter(COL_PAINT_TOTAL)}{r}")
-
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL,
-                value=(
-                    f"=SUM({get_column_letter(COL_GIB_TOTAL)}{r},"
-                    f"{get_column_letter(COL_STOP_TOTAL)}{r},"
-                    f"{get_column_letter(COL_PAINT_TOTAL)}{r})"
-                ),
-            ).number_format = "0.00"
+            self._write_gib(r, f"={TAXAS_GIB_TOTAL_M2}")
+            if item.include_stopping:
+                self._write_stopping(r, f"={TAXAS_STOPPING}")
+            if item.include_painting:
+                self._write_painting(r, f"={TAXAS_PAINTING}")
+            self._write_row_total(r)
             self._row += 1
 
         if square_stop_qty:
@@ -358,21 +345,10 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=square_stop_qty)
             ws.cell(row=r, column=COL_QTY_UNIT, value="m")
             ws.cell(row=r, column=COL_HEIGHT, value=1)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m")
-            stop_rate_cell = f"{get_column_letter(COL_STOP_RATE)}{r}"
-            ws.cell(row=r, column=COL_STOP_RATE, value=self._sale_ref("SQUARE STOP")).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_STOP_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{stop_rate_cell}",
-            ).number_format = "0.00"
-            self._stop_total_cells.append(f"{get_column_letter(COL_STOP_TOTAL)}{r}")
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_STOP_TOTAL)}{r}"
-            ).number_format = "0.00"
+            self._write_stopping(r, f"={TAXAS_STOPPING}")
+            ws.cell(row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_STOP_TOTAL)}{r}").number_format = "0.00"
             self._row += 1
 
     # -- seção de pintura avulsa (rodapé, portas) ------------------------------
@@ -388,21 +364,10 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=skirting_m)
             ws.cell(row=r, column=COL_QTY_UNIT, value="m")
             ws.cell(row=r, column=COL_HEIGHT, value=1)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m")
-            paint_rate_cell = f"{get_column_letter(COL_PAINT_RATE)}{r}"
-            ws.cell(row=r, column=COL_PAINT_RATE, value=self._sale_ref("Painting Skirting")).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_PAINT_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{paint_rate_cell}",
-            ).number_format = "0.00"
-            self._paint_total_cells.append(f"{get_column_letter(COL_PAINT_TOTAL)}{r}")
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_PAINT_TOTAL)}{r}"
-            ).number_format = "0.00"
+            self._write_painting(r, f"={TAXAS_SKIRTING_PAINT}")
+            ws.cell(row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_PAINT_TOTAL)}{r}").number_format = "0.00"
             self._row += 1
 
         for door in doors:
@@ -411,26 +376,16 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_QTY, value=door.count)
             ws.cell(row=r, column=COL_QTY_UNIT, value="ea")
             ws.cell(row=r, column=COL_HEIGHT, value=1)
-            ws.cell(
-                row=r, column=COL_TOTAL,
-                value=f"={get_column_letter(COL_QTY)}{r}*{get_column_letter(COL_HEIGHT)}{r}",
-            ).number_format = "0"
+            self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="each")
-            paint_rate_cell = f"{get_column_letter(COL_PAINT_RATE)}{r}"
-            ws.cell(row=r, column=COL_PAINT_RATE, value=self._sale_ref(door.rate_label)).number_format = "0.00"
-            ws.cell(
-                row=r, column=COL_PAINT_TOTAL,
-                value=f"={get_column_letter(COL_TOTAL)}{r}*{paint_rate_cell}",
-            ).number_format = "0.00"
-            self._paint_total_cells.append(f"{get_column_letter(COL_PAINT_TOTAL)}{r}")
-            ws.cell(
-                row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_PAINT_TOTAL)}{r}"
-            ).number_format = "0.00"
+            rate_ref = TAXAS_SINGLE_DOOR if door.door_type == "single" else TAXAS_DOUBLE_DOOR
+            self._write_painting(r, f"={rate_ref}")
+            ws.cell(row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_PAINT_TOTAL)}{r}").number_format = "0.00"
             self._row += 1
 
     # -- aba Resumo -----------------------------------------------------------
     def add_summary_sheet(self) -> None:
-        ws = self.wb.create_sheet("Summary", 0)
+        ws = self.wb.create_sheet("Summary", 1)
 
         def joined(cells: list[str]) -> str:
             if not cells:
@@ -444,14 +399,10 @@ class QuantitiesWorkbookBuilder:
         ws.cell(row=4, column=5, value="PAINTING").font = _BOLD
         ws.cell(row=4, column=6, value="TOTAL").font = _BOLD
 
-        gib_ref = joined(self._gib_total_cells)
-        stop_ref = joined(self._stop_total_cells)
-        paint_ref = joined(self._paint_total_cells)
-
         ws.cell(row=5, column=2, value="TOTAL").font = _BOLD
-        ws.cell(row=5, column=3, value=gib_ref).number_format = "#,##0.00"
-        ws.cell(row=5, column=4, value=stop_ref).number_format = "#,##0.00"
-        ws.cell(row=5, column=5, value=paint_ref).number_format = "#,##0.00"
+        ws.cell(row=5, column=3, value=joined(self._gib_total_cells)).number_format = "#,##0.00"
+        ws.cell(row=5, column=4, value=joined(self._stop_total_cells)).number_format = "#,##0.00"
+        ws.cell(row=5, column=5, value=joined(self._paint_total_cells)).number_format = "#,##0.00"
         ws.cell(row=5, column=6, value="=SUM(C5:E5)").number_format = "#,##0.00"
 
         ws.cell(row=8, column=2, value="GROSS MARGIN (%)")
@@ -461,10 +412,7 @@ class QuantitiesWorkbookBuilder:
         ws.cell(row=10, column=2, value="CONTINGENCY (%)")
         ws.cell(row=10, column=3, value=0.05).number_format = "0%"
         ws.cell(row=12, column=2, value="PREÇO FINAL DE VENDA").font = _BOLD
-        ws.cell(
-            row=12, column=3,
-            value="=F5*(1+C10)+C9",
-        ).number_format = "#,##0.00"
+        ws.cell(row=12, column=3, value="=F5*(1+C10)+C9").number_format = "#,##0.00"
 
         for col, width in ((1, 4), (2, 22), (3, 14), (4, 14), (5, 14), (6, 14)):
             ws.column_dimensions[get_column_letter(col)].width = width
