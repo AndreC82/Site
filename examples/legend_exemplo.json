@@ -1,0 +1,39 @@
+{
+  "P-01": {
+    "category": "wall_paint",
+    "description": "Tinta acrílica fosca branco neve"
+  },
+  "P-02": {
+    "category": "wall_paint",
+    "description": "Tinta acrílica semibrilho cinza claro"
+  },
+  "PT-01": {
+    "category": "ceiling_paint",
+    "description": "Tinta PVA teto branco gelo"
+  },
+  "GB-FL-SL": {
+    "category": "drywall",
+    "description": "Gesso acartonado Fireline - camada única (single layer)",
+    "layers": 1
+  },
+  "GB-FL-DL": {
+    "category": "drywall",
+    "description": "Gesso acartonado Fireline - camada dupla (double layer)",
+    "layers": 2
+  },
+  "GB-AQ-SL": {
+    "category": "drywall",
+    "description": "Gesso acartonado Aqualine (área molhada) - camada única",
+    "layers": 1
+  },
+  "GB-AQ-DL": {
+    "category": "drywall",
+    "description": "Gesso acartonado Aqualine (área molhada) - camada dupla",
+    "layers": 2
+  },
+  "GB-ST-SL": {
+    "category": "drywall",
+    "description": "Gesso acartonado Standard - camada única",
+    "layers": 1
+  }
+}
