@@ -27,9 +27,9 @@ def build_example(output_path: str) -> None:
         board_height_m=2.4,
         corner_trim_rate=8.00,
         sealant_rate=7.00,
-        skirting_paint_rate=12.00,
-        single_door_rate=200.00,
-        double_door_rate=360.00,
+        skirting_paint_rate=15.00,
+        single_door_rate=250.00,
+        double_door_rate=450.00,
     )
 
     builder.start()
