@@ -1,8 +1,10 @@
 """Gera a planilha de quantidades/orçamento no formato usado pelo estimador:
 agrupada por tipo de forro (Fireline, Aqualine, Standard...) e altura de parede,
 com 3 taxas por linha (GIB, Stopping, Pintura) em $/m² puxadas de uma aba
-"Taxas" única (preço de venda por m², sem tabela por espessura de chapa) e uma
-aba Resumo com GIB/Plaster/Painting/Total, Margem e Contingência.
+"Taxas" única. O Gib é precificado por tipo/espessura (instalação + custo da
+chapa dividido pela área da chapa), Pintura e Stopping são valores únicos.
+Todos os valores de custo levam uma margem (%) até virarem preço de venda.
+Uma aba Resumo soma GIB/Plaster/Painting/Total, Margem e Contingência.
 """
 
 from __future__ import annotations
@@ -35,28 +37,70 @@ COL_PAINT_RATE = 14  # N
 COL_PAINT_TOTAL = 15  # O
 COL_ROW_TOTAL = 17  # Q
 
-# Endereços fixos da aba "Taxas" (ver add_rates_sheet).
-TAXAS_PAINTING = "'Taxas'!$C$5"
-TAXAS_STOPPING = "'Taxas'!$C$6"
-TAXAS_GIB_INSTALL = "'Taxas'!$C$7"
-TAXAS_BOARD_COST = "'Taxas'!$C$10"
-TAXAS_BOARD_WIDTH = "'Taxas'!$C$11"
-TAXAS_BOARD_HEIGHT = "'Taxas'!$C$12"
-TAXAS_BOARD_AREA = "'Taxas'!$C$13"
-TAXAS_BOARD_COST_M2 = "'Taxas'!$C$14"
-TAXAS_GIB_TOTAL_M2 = "'Taxas'!$C$16"
-TAXAS_CORNER = "'Taxas'!$C$20"
-TAXAS_SEALANT = "'Taxas'!$C$21"
-TAXAS_SKIRTING_PAINT = "'Taxas'!$C$22"
-TAXAS_SINGLE_DOOR = "'Taxas'!$C$23"
-TAXAS_DOUBLE_DOOR = "'Taxas'!$C$24"
+# Colunas fixas da aba "Taxas".
+TAXAS_COL_LABEL = 2  # B
+TAXAS_COL_INSTALL = 3  # C (instalação/mão de obra, custo $/m² - só linhas de Gib)
+TAXAS_COL_BOARD_COST = 4  # D (custo da chapa $ - só linhas de Gib)
+TAXAS_COL_BOARD_COST_M2 = 5  # E (custo da chapa por m², fórmula - só linhas de Gib)
+TAXAS_COL_COST_TOTAL = 6  # F (custo total $/m² ou $/unidade)
+TAXAS_COL_SALE = 7  # G (venda = custo x (1+margem) - é isso que a Quantities referencia)
+
+TAXAS_MARGIN_CELL = "'Taxas'!$C$4"
+TAXAS_BOARD_WIDTH_CELL = "'Taxas'!$C$6"
+TAXAS_BOARD_HEIGHT_CELL = "'Taxas'!$C$7"
+TAXAS_BOARD_AREA_CELL = "'Taxas'!$C$8"
+
+# Tipos de chapa de Gib padrão (linhas 11-18 da tabela de taxas).
+GIB_BOARD_TYPES = [
+    "10mm Standard",
+    "10mm Aqualine",
+    "13mm Standard",
+    "13mm Aqualine",
+    "13mm Fireline",
+    "13mm Noiseline",
+    "16mm Fireline",
+    "19mm Fireline",
+]
+_GIB_TABLE_FIRST_ROW = 11
+
+# Itens de taxa única (linhas 20-27).
+_PAINTING_ROW = 20
+_STOPPING_WALL_ROW = 21
+_STOPPING_CEILING_ROW = 22
+_CORNER_ROW = 23
+_SEALANT_ROW = 24
+_SKIRTING_ROW = 25
+_SINGLE_DOOR_ROW = 26
+_DOUBLE_DOOR_ROW = 27
+
+
+def _sale_cell(row: int) -> str:
+    return f"'Taxas'!${get_column_letter(TAXAS_COL_SALE)}${row}"
+
+
+TAXAS_PAINTING = _sale_cell(_PAINTING_ROW)
+TAXAS_STOPPING_WALL = _sale_cell(_STOPPING_WALL_ROW)
+TAXAS_STOPPING_CEILING = _sale_cell(_STOPPING_CEILING_ROW)
+TAXAS_CORNER = _sale_cell(_CORNER_ROW)
+TAXAS_SEALANT = _sale_cell(_SEALANT_ROW)
+TAXAS_SKIRTING_PAINT = _sale_cell(_SKIRTING_ROW)
+TAXAS_SINGLE_DOOR = _sale_cell(_SINGLE_DOOR_ROW)
+TAXAS_DOUBLE_DOOR = _sale_cell(_DOUBLE_DOOR_ROW)
+
+
+@dataclass
+class GibBoardRate:
+    board_type: str  # deve bater com um dos GIB_BOARD_TYPES
+    install_cost_m2: float  # mão de obra, $/m² de custo
+    board_cost: float  # custo da chapa inteira, $
 
 
 @dataclass
 class LiningItem:
     description: str  # ex.: "1x 10mm Standard", "2x 19mm Fireline"
     qty: float  # metros lineares de parede com esse tipo de forro
-    qty_unit: str = "m"  # 'm' (linear)
+    board_type: str  # referencia um item de GIB_BOARD_TYPES
+    qty_unit: str = "m"
     layers: int = 1  # 1 = single layer, 2 = double layer (dobra o custo de Gib)
     include_stopping: bool = True
     include_painting: bool = True
@@ -76,6 +120,7 @@ class HeightGroup:
 class CeilingItem:
     description: str  # ex.: "13mm Standard Gib board (C1)"
     area_m2: float
+    board_type: str
     include_stopping: bool = True
     include_painting: bool = True
 
@@ -115,77 +160,113 @@ class QuantitiesWorkbookBuilder:
         self._gib_total_cells: list[str] = []
         self._stop_total_cells: list[str] = []
         self._paint_total_cells: list[str] = []
+        self._board_type_rows: dict[str, int] = {
+            board_type: _GIB_TABLE_FIRST_ROW + i for i, board_type in enumerate(GIB_BOARD_TYPES)
+        }
         self._row = 1
 
-    # -- aba "Taxas": único lugar onde os preços de venda são preenchidos ----
+    def _gib_sale_ref(self, board_type: str) -> str:
+        row = self._board_type_rows[board_type]
+        return _sale_cell(row)
+
+    # -- aba "Taxas": único lugar onde os preços são preenchidos --------------
     def add_rates_sheet(
         self,
-        painting_rate: float,
-        stopping_rate: float,
-        gib_install_rate: float,
-        board_cost: float,
+        margin: float,
+        gib_rates: list[GibBoardRate],
+        painting_cost: float,
+        stopping_wall_cost: float,
+        stopping_ceiling_cost: float,
         board_width_m: float = 1.2,
         board_height_m: float = 2.4,
-        corner_trim_rate: float = 0.0,
-        sealant_rate: float = 0.0,
-        skirting_paint_rate: float = 0.0,
-        single_door_rate: float = 0.0,
-        double_door_rate: float = 0.0,
+        corner_trim_cost: float = 0.0,
+        sealant_cost: float = 0.0,
+        skirting_paint_cost: float = 0.0,
+        single_door_cost: float = 0.0,
+        double_door_cost: float = 0.0,
     ) -> None:
         ws = self.wb.create_sheet("Taxas", 0)
-        ws.cell(row=2, column=2, value="Taxas de Venda por m² (preencha aqui)").font = Font(bold=True, size=13)
+        ws.cell(row=2, column=2, value="Taxas (preencha os valores de custo; a venda calcula sozinha)").font = Font(bold=True, size=13)
 
-        ws.cell(row=4, column=2, value="Trabalho").font = _BOLD
-        ws.cell(row=4, column=3, value="Valor").font = _BOLD
-        for r, label, value, fmt in (
-            (5, "Pintura ($/m²)", painting_rate, "0.00"),
-            (6, "Reboco / Stopping ($/m²)", stopping_rate, "0.00"),
-            (7, "Instalação de Gib - mão de obra ($/m²)", gib_install_rate, "0.00"),
-        ):
-            ws.cell(row=r, column=2, value=label)
-            cell = ws.cell(row=r, column=3, value=value)
-            cell.number_format = fmt
-            cell.fill = _INPUT_FILL
+        ws.cell(row=4, column=2, value="Margem (%)").font = _BOLD
+        margin_cell = ws.cell(row=4, column=3, value=margin)
+        margin_cell.number_format = "0%"
+        margin_cell.fill = _INPUT_FILL
 
-        ws.cell(row=9, column=2, value="Chapa de Gib").font = _BOLD
-        input_rows = [
-            (10, "Custo da chapa ($)", board_cost, "0.00", True),
-            (11, "Largura da chapa (m)", board_width_m, "0.00", True),
-            (12, "Altura da chapa (m)", board_height_m, "0.00", True),
+        ws.cell(row=6, column=2, value="Largura da chapa (m)")
+        w_cell = ws.cell(row=6, column=3, value=board_width_m)
+        w_cell.number_format = "0.00"
+        w_cell.fill = _INPUT_FILL
+        ws.cell(row=7, column=2, value="Altura da chapa (m)")
+        h_cell = ws.cell(row=7, column=3, value=board_height_m)
+        h_cell.number_format = "0.00"
+        h_cell.fill = _INPUT_FILL
+        ws.cell(row=8, column=2, value="Área da chapa (m²)")
+        ws.cell(row=8, column=3, value=f"={TAXAS_BOARD_WIDTH_CELL}*{TAXAS_BOARD_HEIGHT_CELL}").number_format = "0.00"
+
+        headers = {
+            TAXAS_COL_LABEL: "Item",
+            TAXAS_COL_INSTALL: "Instalação (custo $/m²)",
+            TAXAS_COL_BOARD_COST: "Custo da chapa ($)",
+            TAXAS_COL_BOARD_COST_M2: "Custo chapa ($/m²)",
+            TAXAS_COL_COST_TOTAL: "Custo total ($/m² ou $/un)",
+            TAXAS_COL_SALE: "Venda ($/m² ou $/un)",
+        }
+        for col, text in headers.items():
+            ws.cell(row=10, column=col, value=text)
+        _style_header(ws, 10, list(headers.keys()))
+
+        rates_by_type = {r.board_type: r for r in gib_rates}
+        for board_type, row in self._board_type_rows.items():
+            rate = rates_by_type.get(board_type, GibBoardRate(board_type, 0.0, 0.0))
+            ws.cell(row=row, column=TAXAS_COL_LABEL, value=board_type)
+            install_cell = ws.cell(row=row, column=TAXAS_COL_INSTALL, value=rate.install_cost_m2)
+            install_cell.number_format = "0.00"
+            install_cell.fill = _INPUT_FILL
+            board_cell = ws.cell(row=row, column=TAXAS_COL_BOARD_COST, value=rate.board_cost)
+            board_cell.number_format = "0.00"
+            board_cell.fill = _INPUT_FILL
+            ws.cell(
+                row=row, column=TAXAS_COL_BOARD_COST_M2,
+                value=f"={get_column_letter(TAXAS_COL_BOARD_COST)}{row}/{TAXAS_BOARD_AREA_CELL}",
+            ).number_format = "0.00"
+            ws.cell(
+                row=row, column=TAXAS_COL_COST_TOTAL,
+                value=(
+                    f"={get_column_letter(TAXAS_COL_INSTALL)}{row}+"
+                    f"{get_column_letter(TAXAS_COL_BOARD_COST_M2)}{row}"
+                ),
+            ).number_format = "0.00"
+            ws.cell(
+                row=row, column=TAXAS_COL_SALE,
+                value=f"={get_column_letter(TAXAS_COL_COST_TOTAL)}{row}*(1+{TAXAS_MARGIN_CELL})",
+            ).number_format = "0.00"
+
+        flat_items = [
+            (_PAINTING_ROW, "Pintura ($/m²)", painting_cost),
+            (_STOPPING_WALL_ROW, "Stopping parede ($/m²)", stopping_wall_cost),
+            (_STOPPING_CEILING_ROW, "Stopping teto - Square Stop ($/m²)", stopping_ceiling_cost),
+            (_CORNER_ROW, "Cantoneira / Corner trim ($/m)", corner_trim_cost),
+            (_SEALANT_ROW, "Selante / Sealant ($/m)", sealant_cost),
+            (_SKIRTING_ROW, "Pintura de rodapé - Skirting ($/m)", skirting_paint_cost),
+            (_SINGLE_DOOR_ROW, "Porta simples - Single door ($/porta)", single_door_cost),
+            (_DOUBLE_DOOR_ROW, "Porta dupla - Double door ($/porta)", double_door_cost),
         ]
-        for r, label, value, fmt, is_input in input_rows:
-            ws.cell(row=r, column=2, value=label)
-            cell = ws.cell(row=r, column=3, value=value)
-            cell.number_format = fmt
-            if is_input:
-                cell.fill = _INPUT_FILL
+        for row, label, cost in flat_items:
+            ws.cell(row=row, column=TAXAS_COL_LABEL, value=label)
+            cost_cell = ws.cell(row=row, column=TAXAS_COL_COST_TOTAL, value=cost)
+            cost_cell.number_format = "0.00"
+            cost_cell.fill = _INPUT_FILL
+            ws.cell(
+                row=row, column=TAXAS_COL_SALE,
+                value=f"={get_column_letter(TAXAS_COL_COST_TOTAL)}{row}*(1+{TAXAS_MARGIN_CELL})",
+            ).number_format = "0.00"
 
-        ws.cell(row=13, column=2, value="Área da chapa (m²)")
-        ws.cell(row=13, column=3, value=f"={TAXAS_BOARD_WIDTH}*{TAXAS_BOARD_HEIGHT}").number_format = "0.00"
-
-        ws.cell(row=14, column=2, value="Custo da chapa por m² ($/m²)")
-        ws.cell(row=14, column=3, value=f"={TAXAS_BOARD_COST}/{TAXAS_BOARD_AREA}").number_format = "0.00"
-
-        ws.cell(row=16, column=2, value="Total Gib por m² (instalação + chapa)").font = _BOLD
-        total_cell = ws.cell(row=16, column=3, value=f"={TAXAS_GIB_INSTALL}+{TAXAS_BOARD_COST_M2}")
-        total_cell.number_format = "0.00"
-        total_cell.font = _BOLD
-
-        ws.cell(row=19, column=2, value="Outros itens").font = _BOLD
-        for r, label, value in (
-            (20, "Cantoneira / Corner trim ($/m)", corner_trim_rate),
-            (21, "Selante / Sealant ($/m)", sealant_rate),
-            (22, "Pintura de rodapé - Skirting ($/m)", skirting_paint_rate),
-            (23, "Porta simples - Single door ($/porta)", single_door_rate),
-            (24, "Porta dupla - Double door ($/porta)", double_door_rate),
+        for col, width in (
+            (TAXAS_COL_LABEL, 34), (TAXAS_COL_INSTALL, 15), (TAXAS_COL_BOARD_COST, 14),
+            (TAXAS_COL_BOARD_COST_M2, 13), (TAXAS_COL_COST_TOTAL, 16), (TAXAS_COL_SALE, 16),
         ):
-            ws.cell(row=r, column=2, value=label)
-            cell = ws.cell(row=r, column=3, value=value)
-            cell.number_format = "0.00"
-            cell.fill = _INPUT_FILL
-
-        ws.column_dimensions["B"].width = 40
-        ws.column_dimensions["C"].width = 14
+            ws.column_dimensions[get_column_letter(col)].width = width
 
     # -- cabeçalho da aba Quantities ------------------------------------------
     def start(self) -> None:
@@ -282,10 +363,11 @@ class QuantitiesWorkbookBuilder:
             self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value=item.total_unit)
 
-            gib_formula = f"={item.layers}*{TAXAS_GIB_TOTAL_M2}" if item.layers != 1 else f"={TAXAS_GIB_TOTAL_M2}"
+            gib_ref = self._gib_sale_ref(item.board_type)
+            gib_formula = f"={item.layers}*{gib_ref}" if item.layers != 1 else f"={gib_ref}"
             self._write_gib(r, gib_formula)
             if item.include_stopping:
-                self._write_stopping(r, f"={TAXAS_STOPPING}")
+                self._write_stopping(r, f"={TAXAS_STOPPING_WALL}")
             if item.include_painting:
                 self._write_painting(r, f"={TAXAS_PAINTING}")
             self._write_row_total(r)
@@ -331,9 +413,9 @@ class QuantitiesWorkbookBuilder:
             self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m2")
 
-            self._write_gib(r, f"={TAXAS_GIB_TOTAL_M2}")
+            self._write_gib(r, f"={self._gib_sale_ref(item.board_type)}")
             if item.include_stopping:
-                self._write_stopping(r, f"={TAXAS_STOPPING}")
+                self._write_stopping(r, f"={TAXAS_STOPPING_WALL}")
             if item.include_painting:
                 self._write_painting(r, f"={TAXAS_PAINTING}")
             self._write_row_total(r)
@@ -347,7 +429,7 @@ class QuantitiesWorkbookBuilder:
             ws.cell(row=r, column=COL_HEIGHT, value=1)
             self._write_total(r)
             ws.cell(row=r, column=COL_TOTAL_UNIT, value="m")
-            self._write_stopping(r, f"={TAXAS_STOPPING}")
+            self._write_stopping(r, f"={TAXAS_STOPPING_CEILING}")
             ws.cell(row=r, column=COL_ROW_TOTAL, value=f"={get_column_letter(COL_STOP_TOTAL)}{r}").number_format = "0.00"
             self._row += 1
 
