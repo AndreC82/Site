@@ -7,6 +7,19 @@ Standard, camada única/dupla etc.), e gera uma planilha `.xlsx` pronta para or�
 com resumo por código, abas por categoria e um detalhamento por ambiente que você pode
 conferir e ajustar manualmente.
 
+## Jeito mais fácil: página local no navegador (upload arrastando o PDF)
+
+Em vez de digitar comando toda vez, rode uma vez:
+
+```bash
+python -m pdf_takeoff.webapp
+```
+
+Abra **http://localhost:5000** no navegador. Arraste o PDF da planta pra
+caixa, clique em **Processar**, e baixe a planilha de entrada pré-preenchida
+e o PDF de conferência pelos links que aparecem. Deixe o terminal aberto
+enquanto usa a página (é ele que está rodando o processamento).
+
 ## Extração automática a partir do PDF (plantas com convenção GIB - NZ)
 
 Para plantas de arquitetura que usam a convenção de códigos de sistema GIB
