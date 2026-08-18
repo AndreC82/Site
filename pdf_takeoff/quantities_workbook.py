@@ -58,6 +58,7 @@ GIB_BOARD_TYPES = [
     "13mm Aqualine",
     "13mm Fireline",
     "13mm Noiseline",
+    "13mm Braceline",
     "16mm Fireline",
     "19mm Fireline",
 ]
