@@ -34,3 +34,50 @@ def test_wizard_runs_end_to_end_and_produces_valid_workbook(tmp_path):
 
     wb = load_workbook(output)
     assert set(wb.sheetnames) >= {"Taxas", "Summary", "Quantities"}
+
+
+def test_pressing_enter_on_add_prompts_does_not_add_empty_items(tmp_path):
+    """Regressão: 'Adicionar...?' deve ter padrão N, senão Enter repetido cria
+    grupos/portas vazios (bug relatado pelo usuário)."""
+    answers = iter(
+        [
+            "Teste vazio",
+            "custo", "25", "25", "11", "n", "s", "1.2", "2.4", "8", "55",
+            "8", "7", "15", "250", "450",
+            "",  # Enter em "Adicionar grupo de paredes?" -> não deve adicionar nada
+            "",  # Enter em "Adicionar área de teto?" -> não deve adicionar nada
+            "",  # square stop = 0
+            "",  # skirting = 0
+            "",  # Enter em "Adicionar grupo de portas?" -> não deve adicionar nada
+        ]
+    )
+    output = str(tmp_path / "vazio.xlsx")
+    run_wizard(input_fn=lambda _prompt: next(answers), output_path=output)
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(output)
+    ws = wb["Quantities"]
+    # Só devem existir as linhas de cabeçalho (nenhum grupo/item foi adicionado)
+    data_rows = [
+        row for row in ws.iter_rows(min_row=5, values_only=True) if any(v is not None for v in row)
+    ]
+    assert data_rows == []
+
+
+def test_output_filename_gets_xlsx_extension_when_missing(tmp_path):
+    answers = iter(
+        [
+            "Teste",
+            "custo", "25", "25", "11", "n", "s", "1.2", "2.4", "8", "55",
+            "8", "7", "15", "250", "450",
+            "n", "n", "0", "0", "n",
+        ]
+    )
+    base = str(tmp_path / "sem_extensao")
+    path = run_wizard(input_fn=lambda _prompt: next(answers), output_path=base)
+
+    assert path == base + ".xlsx"
+    import os
+
+    assert os.path.exists(path)

@@ -157,11 +157,11 @@ def _pick_board_type(input_fn: InputFn) -> str:
 def collect_height_groups(input_fn: InputFn = input) -> list[HeightGroup]:
     print("\n=== PAREDES (LININGS) POR ALTURA ===")
     groups: list[HeightGroup] = []
-    while _ask_yes_no(input_fn, "\nAdicionar um grupo de paredes com uma altura de pé-direito?", True):
+    while _ask_yes_no(input_fn, "\nAdicionar um grupo de paredes com uma altura de pé-direito?", False):
         height = _ask_float(input_fn, "  Altura do pé-direito deste grupo (m)", 2.70)
         name = _ask_text(input_fn, "  Nome do grupo", f"LININGS - {height:.2f}m")
         items: list[LiningItem] = []
-        while _ask_yes_no(input_fn, "  Adicionar um tipo de forro a este grupo?", True):
+        while _ask_yes_no(input_fn, "  Adicionar um tipo de forro a este grupo?", False):
             board_type = _pick_board_type(input_fn)
             layers = _ask_int(input_fn, "  Camadas (1 = single layer, 2 = double layer)", 1)
             qty = _ask_float(input_fn, f"  Metros lineares de parede com {board_type} ({layers}x)", 0.0)
@@ -178,7 +178,7 @@ def collect_height_groups(input_fn: InputFn = input) -> list[HeightGroup]:
 def collect_ceilings(input_fn: InputFn = input) -> tuple[list[CeilingItem], float]:
     print("\n=== TETOS (CEILINGS) ===")
     items: list[CeilingItem] = []
-    while _ask_yes_no(input_fn, "Adicionar uma área de teto?", True):
+    while _ask_yes_no(input_fn, "Adicionar uma área de teto?", False):
         board_type = _pick_board_type(input_fn)
         area = _ask_float(input_fn, f"  Área de teto com {board_type} (m²)", 0.0)
         desc = _ask_text(input_fn, "  Descrição da linha", board_type)
@@ -191,7 +191,7 @@ def collect_painting_only(input_fn: InputFn = input) -> tuple[float, list[DoorPa
     print("\n=== PINTURA AVULSA (RODAPÉ, PORTAS) ===")
     skirting = _ask_float(input_fn, "Metros de rodapé (Skirting) a pintar", 0.0)
     doors: list[DoorPaintItem] = []
-    while _ask_yes_no(input_fn, "Adicionar um grupo de portas?", True):
+    while _ask_yes_no(input_fn, "Adicionar um grupo de portas?", False):
         desc = _ask_text(input_fn, "  Descrição (ex.: 'Portas quarto - single swing')", "Portas")
         count = _ask_int(input_fn, "  Quantidade", 0)
         door_type = _ask_choice(input_fn, "  Tipo", ["single", "double"], "single")
@@ -208,7 +208,8 @@ def run_wizard(input_fn: InputFn = input, output_path: str | None = None) -> str
     builder.add_rates_sheet(**rates)
     builder.start()
 
-    for group in collect_height_groups(input_fn):
+    height_groups = collect_height_groups(input_fn)
+    for group in height_groups:
         builder.add_height_group(group)
 
     ceiling_items, square_stop_qty = collect_ceilings(input_fn)
@@ -219,11 +220,20 @@ def run_wizard(input_fn: InputFn = input, output_path: str | None = None) -> str
     if skirting_m or doors:
         builder.add_painting_only(skirting_m, doors)
 
+    if not height_groups and not ceiling_items and not square_stop_qty and not skirting_m and not doors:
+        print(
+            "\nATENÇÃO: nenhuma quantidade foi informada (nenhum grupo de parede, teto, "
+            "rodapé ou porta). A planilha vai sair com todos os totais em $0 — "
+            "rode de novo e responda 's' nas perguntas 'Adicionar...?' para incluir dados."
+        )
+
     builder.add_summary_sheet()
     wb = builder.finish()
 
     if output_path is None:
         output_path = _ask_text(input_fn, "\nNome do arquivo de saída", "orcamento.xlsx")
+    if not output_path.lower().endswith(".xlsx"):
+        output_path += ".xlsx"
     wb.save(output_path)
     print(f"\nPlanilha salva em: {output_path}")
     return output_path
