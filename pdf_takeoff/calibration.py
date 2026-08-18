@@ -16,6 +16,27 @@ _NUMBER_RE = re.compile(r"^\d+([.,]\d+)?$")
 # de cota associada, para ainda considerarmos o par válido.
 _MAX_LABEL_DISTANCE = 40.0
 
+# Escala impressa no carimbo da prancha, ex.: "1:100 @ A2" ou "Scale 1:50".
+# Comum em plantas de arquitetura/engenharia (NZ/AU/UK) — 1 unidade de PDF é
+# sempre 1 ponto (1/72 polegada) no papel, então basta ler a razão "1:N" pra
+# calcular a escala real diretamente, sem depender de casar cota com linha.
+_TITLE_BLOCK_SCALE_RE = re.compile(r"1\s*:\s*(\d+)(?:\s*@\s*A\d)?", re.IGNORECASE)
+_POINTS_TO_METERS_PER_INCH = 25.4 / 1000 / 72  # 1 ponto de PDF = 1/72 polegada
+
+
+def extract_scale_from_title_block(page_text: str) -> float | None:
+    """Lê a escala impressa no carimbo da prancha (ex.: '1:100 @ A2') e
+    calcula diretamente os metros reais por unidade de PDF — muito mais
+    confiável que casar cota com linha em plantas densas com milhares de
+    segmentos, onde uma cota pode ficar mais perto de uma linha errada.
+    Devolve None se não achar esse texto na página.
+    """
+    match = _TITLE_BLOCK_SCALE_RE.search(page_text)
+    if not match:
+        return None
+    n = int(match.group(1))
+    return n * _POINTS_TO_METERS_PER_INCH
+
 
 @dataclass
 class ScaleCandidate:

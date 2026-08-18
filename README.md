@@ -7,6 +7,46 @@ Standard, camada única/dupla etc.), e gera uma planilha `.xlsx` pronta para or�
 com resumo por código, abas por categoria e um detalhamento por ambiente que você pode
 conferir e ajustar manualmente.
 
+## Extração automática a partir do PDF (plantas com convenção GIB - NZ)
+
+Para plantas de arquitetura que usam a convenção de códigos de sistema GIB
+comum na Nova Zelândia (legenda "Ceiling Linings N", nota "Wall Linings",
+callouts "Use GBxxx - N/Tmm Fyreline..." na planta de combate a incêndio),
+o `pdf_takeoff/pdf_to_input.py` lê o PDF direto e já pré-preenche a planilha
+de entrada (Paredes/Tetos) — você só confere e ajusta, em vez de digitar tudo:
+
+```bash
+python -m pdf_takeoff.pdf_to_input planta.pdf entrada_preenchida.xlsx --review-pdf conferencia.pdf
+```
+
+Isso identifica automaticamente, sem depender do número de prancha (funciona
+em qualquer planta com essa convenção, não só um projeto específico):
+- a escala real da planta, lendo o "1:100 @ A2" do carimbo (mais confiável
+  que tentar casar cota com linha numa planta densa);
+- os ambientes (reconstruindo os polígonos de parede a partir do desenho
+  vetorial, com um filtro que tenta remover blocos de nota/legenda que não
+  são ambientes de verdade);
+- o tipo de chapa de cada parede (Standard por padrão, Aqualine se o
+  ambiente tiver piso Vinyl/for banheiro/cozinha, ou o tipo lido de um
+  callout de parede resistente a fogo na planta de combate a incêndio, se
+  houver um perto o suficiente do ambiente);
+- o tipo de chapa de cada teto, casando o código (C1, C2...) desenhado na
+  planta de teto com a legenda "Ceiling Linings N".
+
+**Limitações conhecidas — sempre confira antes de orçar:**
+- A reconstrução de ambientes numa planta real e densa tem margem de erro
+  (na planta de teste, ficou ~13% acima da área total declarada na própria
+  planta) — pode incluir área externa (deck, portico) ou perder um ambiente
+  pequeno ocasionalmente.
+- A granularidade é por ambiente inteiro, não por trecho de parede — se um
+  ambiente tem uma parede Fireline e outras Standard, só uma das duas fica
+  registrada (a mais próxima do callout encontrado).
+- Não desconta vãos de porta/janela da área de parede.
+- Gera avisos numa aba "Avisos da Extração" quando algo não foi encontrado.
+
+Use sempre o PDF de conferência (`--review-pdf`) lado a lado com a planilha
+antes de gerar o orçamento final.
+
 ## Planilha de orçamento por taxa (Gib / Stopping / Pintura)
 
 Além do fluxo por PDF acima, o módulo `pdf_takeoff/quantities_workbook.py` gera

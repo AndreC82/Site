@@ -63,3 +63,46 @@ def area_m2(polygon: Polygon, scale_m_per_unit: float) -> float:
 
 def perimeter_m(polygon: Polygon, scale_m_per_unit: float) -> float:
     return polygon.length * scale_m_per_unit
+
+
+def filter_title_block_noise(
+    polygons: list[Polygon],
+    page_width: float,
+    page_height: float,
+    scale_m_per_unit: float,
+    words: list,
+    max_span_ratio: float = 0.85,
+    max_word_density_per_m2: float = 2.0,
+) -> list[Polygon]:
+    """Remove polígonos que quase certamente não são ambientes internos, mas sim
+    a moldura do quadro de textos/legenda da prancha (comum em plantas de
+    arquitetura). Dois sinais, ambos genéricos (não específicos de um projeto):
+
+    1. Tiras que ocupam quase a largura/altura inteira da página — são a
+       coluna de notas ou a faixa do carimbo do desenho, nunca um ambiente.
+    2. Densidade de texto muito alta (palavras por m²) — um parágrafo de
+       especificação tem dezenas de palavras espremidas numa área pequena;
+       um ambiente real normalmente só tem o nome e talvez o tipo de piso.
+
+    Isso não elimina 100% do ruído (ex.: áreas externas cobertas, como um
+    deck, ainda podem passar) — sempre confira visualmente antes de confiar
+    nos números.
+    """
+    from shapely.geometry import Point
+
+    kept = []
+    for poly in polygons:
+        minx, miny, maxx, maxy = poly.bounds
+        span_w = (maxx - minx) / page_width if page_width else 0
+        span_h = (maxy - miny) / page_height if page_height else 0
+        if span_w > max_span_ratio or span_h > max_span_ratio:
+            continue
+        area = poly.area * (scale_m_per_unit**2)
+        if area <= 0:
+            continue
+        word_count = sum(1 for w in words if poly.contains(Point(w.center)))
+        density = word_count / area
+        if density > max_word_density_per_m2:
+            continue
+        kept.append(poly)
+    return kept
