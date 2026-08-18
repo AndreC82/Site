@@ -23,7 +23,7 @@ from shapely.geometry import Point
 
 from .calibration import auto_detect_scale, extract_scale_from_title_block
 from .extract import PageContent, TextWord, extract_pdf
-from .geometry import area_m2, build_room_polygons, filter_title_block_noise, perimeter_m
+from .geometry import area_m2, build_room_polygons, exclude_exterior_areas, filter_title_block_noise, perimeter_m
 from .gib_spec_extract import (
     BoardSpec,
     extract_ceiling_legend,
@@ -93,6 +93,7 @@ def _reconstruct_rooms(page: PageContent, page_text: str) -> tuple[list, float]:
     scale, confident = _page_scale(page_text, page)
     polys = build_room_polygons(page.segments, min_area=_MIN_ROOM_AREA_M2 / scale**2)
     polys = filter_title_block_noise(polys, page.width, page.height, scale, page.words)
+    polys = exclude_exterior_areas(polys, page.words)
     return polys, scale
 
 

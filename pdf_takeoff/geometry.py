@@ -84,9 +84,8 @@ def filter_title_block_noise(
        especificação tem dezenas de palavras espremidas numa área pequena;
        um ambiente real normalmente só tem o nome e talvez o tipo de piso.
 
-    Isso não elimina 100% do ruído (ex.: áreas externas cobertas, como um
-    deck, ainda podem passar) — sempre confira visualmente antes de confiar
-    nos números.
+    Isso não elimina 100% do ruído — sempre confira visualmente antes de
+    confiar nos números. Veja também `exclude_exterior_areas`.
     """
     from shapely.geometry import Point
 
@@ -103,6 +102,33 @@ def filter_title_block_noise(
         word_count = sum(1 for w in words if poly.contains(Point(w.center)))
         density = word_count / area
         if density > max_word_density_per_m2:
+            continue
+        kept.append(poly)
+    return kept
+
+
+# Termos que só aparecem rotulando área externa coberta (nunca um ambiente
+# interno com gesso/pintura) em plantas de arquitetura em inglês. Lista curta
+# e específica de propósito — uma lista ampla de palavras já se mostrou
+# perigosa (acaba excluindo ambientes reais que têm essas palavras por perto
+# em notas/cotas vizinhas).
+_EXTERIOR_AREA_KEYWORDS = {"deck", "portico", "verandah", "veranda", "carport", "pergola"}
+
+
+def exclude_exterior_areas(
+    polygons: list[Polygon], words: list, keywords: set[str] = _EXTERIOR_AREA_KEYWORDS
+) -> list[Polygon]:
+    """Remove polígonos cujo próprio rótulo contém uma palavra que só é usada
+    pra área externa coberta (deck, portico, etc.) — essas áreas não levam
+    gesso/pintura interna, mas ainda assim formam um polígono fechado no
+    desenho e podem ser confundidas com um ambiente.
+    """
+    from shapely.geometry import Point
+
+    kept = []
+    for poly in polygons:
+        words_inside = {w.text.strip(".,()").lower() for w in words if poly.contains(Point(w.center))}
+        if words_inside & keywords:
             continue
         kept.append(poly)
     return kept
