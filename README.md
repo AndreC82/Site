@@ -12,17 +12,29 @@ conferir e ajustar manualmente.
 Além do fluxo por PDF acima, o módulo `pdf_takeoff/quantities_workbook.py` gera
 uma planilha no formato de orçamento por m² (Gib por tipo/espessura de chapa +
 Stopping parede/teto + Pintura, com margem), no mesmo padrão usado por
-orçamentistas. Duas formas de usar:
+orçamentistas. Três formas de usar:
 
-**Modo interativo (recomendado):**
+**Planilha de entrada (recomendado)** — preenche uma tabela normal do Excel,
+com menus suspensos pra evitar erro de digitação, em vez de responder
+perguntas num terminal:
+
+```bash
+# 1. Gera o modelo em branco (com uma linha de EXEMPLO em cada aba, cinza/itálico)
+python -m pdf_takeoff.input_template gerar entrada.xlsx
+
+# 2. Abra entrada.xlsx no Excel e preencha as abas Taxas, Paredes, Tetos e
+#    Pintura Avulsa (apague ou ignore as linhas EXEMPLO)
+
+# 3. Gera a planilha de orçamento final a partir do que foi preenchido
+python -m pdf_takeoff.input_template construir entrada.xlsx orcamento.xlsx --nome "Nome do Projeto"
+```
+
+**Modo interativo** (perguntas em sequência no terminal — mais propenso a erro
+se você apertar Enter sem querer, prefira o modo de planilha acima):
 
 ```bash
 python -m pdf_takeoff.wizard
 ```
-
-O assistente pergunta as taxas (custo ou venda? margem? Gib único ou por tipo de
-chapa? separar Stopping de parede e teto?) e as quantidades (grupos de parede
-por altura, áreas de teto, rodapé, portas), e salva a planilha pronta no final.
 
 **Modo script**, editando os valores em `pdf_takeoff/demo_quantities.py` e rodando:
 
