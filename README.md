@@ -20,6 +20,16 @@ caixa, clique em **Processar**, e baixe a planilha de entrada pré-preenchida
 e o PDF de conferência pelos links que aparecem. Deixe o terminal aberto
 enquanto usa a página (é ele que está rodando o processamento).
 
+**Se alguma informação não for encontrada na planta** (ex.: altura de
+pé-direito), a página pergunta antes de gerar a planilha, em vez de assumir
+um valor padrão sem avisar.
+
+**Depois de ajustar a planilha de entrada** (corrigir metros, tipo de
+chapa, taxas etc. direto no Excel, comparando com o PDF de conferência),
+arraste ela de volta na seção **"Já ajustei a planilha de entrada"** da
+mesma página, pra gerar o orçamento final — sem precisar do terminal pra
+esse passo também.
+
 ## Extração automática a partir do PDF (plantas com convenção GIB - NZ)
 
 Para plantas de arquitetura que usam a convenção de códigos de sistema GIB

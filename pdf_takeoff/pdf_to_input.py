@@ -60,6 +60,9 @@ class AnalysisResult:
     height_by_level: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     scale_confident: bool = True
+    # Níveis (ex.: "Lower", "Upper") em que não achamos a altura de pé-direito
+    # na planta e por isso precisamos perguntar pro usuário.
+    levels_missing_height: set[str] = field(default_factory=set)
 
 
 def _room_label(polygon, words: list[TextWord]) -> str:
@@ -84,6 +87,25 @@ def _page_scale(page_text: str, page: PageContent) -> tuple[float, bool]:
     return result.scale_m_per_unit, result.confident
 
 
+_TITLE_SCALE_RATIO_RE = re.compile(r"1\s*:\s*(\d+)(?:\s*@\s*A\d)?", re.IGNORECASE)
+_MIN_WHOLE_BUILDING_SCALE_RATIO = 40  # abaixo disso (ex.: 1:20, 1:10) é prancha de detalhe, não de planta
+
+
+def _looks_like_whole_building_plan(page_text: str) -> bool:
+    """Uma prancha de planta de piso/teto/incêndio do edifício inteiro é
+    sempre desenhada numa escala "grande" (tipicamente 1:50 a 1:200). Uma
+    prancha de detalhe construtivo (junção de parede, perfil de rodapé etc.)
+    usa escala bem mais "de perto" (1:1 a 1:20) e às vezes só menciona
+    "Floor Plan" de passagem numa nota — sem esse filtro ela entraria como
+    se fosse uma prancha de planta de verdade. Sem informação de escala
+    (ex.: página de capa), tratamos como não sendo uma planta.
+    """
+    match = _TITLE_SCALE_RATIO_RE.search(page_text)
+    if not match:
+        return False
+    return int(match.group(1)) >= _MIN_WHOLE_BUILDING_SCALE_RATIO
+
+
 def _page_level(page_text: str) -> str:
     match = re.search(r"\b(Lower|Upper|Ground|First)\b\s+(?:Floor|Ceiling|Fire Control)\s+Plan", page_text, re.IGNORECASE)
     return match.group(1).title() if match else "Default"
@@ -97,7 +119,13 @@ def _reconstruct_rooms(page: PageContent, page_text: str) -> tuple[list, float]:
     return polys, scale
 
 
-def analyze_pdf(pdf_path: str) -> AnalysisResult:
+def analyze_pdf(pdf_path: str, height_overrides: dict[str, float] | None = None) -> AnalysisResult:
+    """height_overrides: {"Lower": 2.7, "Upper": 2.55, ...} — usado quando a
+    altura de pé-direito não foi encontrada na planta pra um nível (veja
+    `AnalysisResult.levels_missing_height`); passe os valores que o usuário
+    informou manualmente pra completar a análise sem precisar adivinhar.
+    """
+    height_overrides = height_overrides or {}
     doc = fitz.open(pdf_path)
     pages = extract_pdf(pdf_path)
     pages_text = [doc[i].get_text() for i in range(len(doc))]
@@ -120,10 +148,16 @@ def analyze_pdf(pdf_path: str) -> AnalysisResult:
     for i, text in enumerate(pages_text):
         if not re.search(r"Floor Plan", text, re.IGNORECASE) or re.search(r"Floor Plan\s*Dimensions", text, re.IGNORECASE):
             continue
+        if not _looks_like_whole_building_plan(text):
+            continue
         level = _page_level(text)
-        height_m = extract_stud_height_m(text)
-        if height_m:
-            result.height_by_level[level] = height_m
+        if level not in result.height_by_level:
+            height_m = extract_stud_height_m(text) or height_overrides.get(level)
+            if height_m:
+                result.height_by_level[level] = height_m
+                result.levels_missing_height.discard(level)
+            else:
+                result.levels_missing_height.add(level)
 
         polys, scale = _reconstruct_rooms(pages[i], text)
         if not scale:
@@ -158,7 +192,7 @@ def analyze_pdf(pdf_path: str) -> AnalysisResult:
     # de um ambiente já reconstruído na planta de piso daquele nível. A área
     # do teto de um ambiente é a mesma área do seu piso (teto reto padrão).
     for i, text in enumerate(pages_text):
-        if not re.search(r"Ceiling Plan", text, re.IGNORECASE):
+        if not re.search(r"Ceiling Plan", text, re.IGNORECASE) or not _looks_like_whole_building_plan(text):
             continue
         level = _page_level(text)
         rooms_this_level = floor_plan_rooms.get(level, [])
@@ -178,7 +212,7 @@ def analyze_pdf(pdf_path: str) -> AnalysisResult:
 
     # -- combate a incêndio: acha paredes resistentes a fogo e sobrescreve ---
     for i, text in enumerate(pages_text):
-        if not re.search(r"Fire Control Plan", text, re.IGNORECASE):
+        if not re.search(r"Fire Control Plan", text, re.IGNORECASE) or not _looks_like_whole_building_plan(text):
             continue
         level = _page_level(text)
         callouts = extract_fire_wall_callouts(doc[i])
