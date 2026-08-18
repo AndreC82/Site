@@ -7,6 +7,29 @@ Standard, camada única/dupla etc.), e gera uma planilha `.xlsx` pronta para or�
 com resumo por código, abas por categoria e um detalhamento por ambiente que você pode
 conferir e ajustar manualmente.
 
+## Planilha de orçamento por taxa (Gib / Stopping / Pintura)
+
+Além do fluxo por PDF acima, o módulo `pdf_takeoff/quantities_workbook.py` gera
+uma planilha no formato de orçamento por m² (Gib por tipo/espessura de chapa +
+Stopping parede/teto + Pintura, com margem), no mesmo padrão usado por
+orçamentistas. Duas formas de usar:
+
+**Modo interativo (recomendado):**
+
+```bash
+python -m pdf_takeoff.wizard
+```
+
+O assistente pergunta as taxas (custo ou venda? margem? Gib único ou por tipo de
+chapa? separar Stopping de parede e teto?) e as quantidades (grupos de parede
+por altura, áreas de teto, rodapé, portas), e salva a planilha pronta no final.
+
+**Modo script**, editando os valores em `pdf_takeoff/demo_quantities.py` e rodando:
+
+```bash
+python -m pdf_takeoff.demo_quantities minha_planilha.xlsx
+```
+
 ## Como funciona (visão geral)
 
 1. **Extração** (`pdf_takeoff/extract.py`): lê os traçados vetoriais (linhas/retângulos das
