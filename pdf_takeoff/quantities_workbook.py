@@ -54,6 +54,7 @@ TAXAS_BOARD_AREA_CELL = "'Taxas'!$C$8"
 GIB_BOARD_TYPES = [
     "10mm Standard",
     "10mm Aqualine",
+    "10mm Noiseline",
     "13mm Standard",
     "13mm Aqualine",
     "13mm Fireline",
