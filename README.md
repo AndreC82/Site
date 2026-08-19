@@ -30,6 +30,42 @@ arraste ela de volta na seção **"Já ajustei a planilha de entrada"** da
 mesma página, pra gerar o orçamento final — sem precisar do terminal pra
 esse passo também.
 
+## Wall Linings Plan (parede colorida por tipo + keynote) + relatório de risco bilíngue
+
+Algumas pranchas usam outra convenção: cada trecho de parede é uma **linha
+colorida** (uma cor por tipo/espessura de chapa, ver a legenda "WALL LININGS
+KEY" da própria prancha) e, perto dela, uma **tag de keynote** (ex. "5113G
+4.5") que referencia uma tabela "Keynote Legend" — só o texto do keynote diz
+quantas camadas (1x/2x) e a espessura exata; a cor sozinha não diferencia
+isso. `pdf_takeoff/wall_linings_plan.py` faz o casamento espacial entre cada
+linha colorida e o keynote mais próximo (usando a especificação do keynote
+quando encontrado, caindo para a cor quando não), e gera um quantitativo já
+separado por camada — e não só por cor.
+
+```bash
+python -m pdf_takeoff.wall_linings_plan \
+  building1_gf_wall_linings.pdf building1_ff_wall_linings.pdf \
+  building2_gf_wall_linings.pdf building2_ff_wall_linings.pdf \
+  --output risk_report.xlsx --height 3.0
+```
+
+Isso gera uma planilha **bilíngue (PT/EN lado a lado)** com duas abas:
+- **Quantities / Quantidades**: metros lineares por especificação exata
+  (espessura + produto + camadas), por prancha.
+- **Findings / Achados**: os pontos com maior chance de erro, **ordenados
+  pelo $ em risco estimado** (não pela quantidade de itens), para você
+  revisar só o que mais pesa no orçamento em vez do projeto inteiro. Cobre:
+  trechos sem keynote por perto o suficiente para confirmar camadas/espessura
+  (assumido 1 camada), cores não reconhecidas na legenda, keynote que
+  diverge da cor da linha (agrupado por código, não um aviso por segmento —
+  numa planta densa o "vizinho mais próximo" às vezes é a tag de outra
+  parede, então isso é normal em pequena quantidade), e **blocos de
+  quantidade suspeitosamente idênticos** entre partes do projeto que
+  deveriam ser diferentes (o tipo de erro de copiar/colar sem atualizar).
+
+Tudo isso é determinístico (geometria + regras) — não depende de nenhuma
+chamada de IA, então roda de graça e sem chave de API.
+
 ## Extração automática a partir do PDF (plantas com convenção GIB - NZ)
 
 Para plantas de arquitetura que usam a convenção de códigos de sistema GIB
