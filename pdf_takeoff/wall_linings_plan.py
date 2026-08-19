@@ -229,11 +229,18 @@ def match_segments_to_keynotes(
     scale_m_per_unit: float,
     max_match_dist_m: float = DEFAULT_MAX_MATCH_DIST_M,
 ) -> list[MatchedSegment]:
-    """Para cada segmento, acha a tag de keynote mais próxima (se houver
-    alguma dentro de max_match_dist_m) e usa a especificação dela; senão cai
-    para a especificação da cor. Sinaliza divergência quando o keynote mais
-    próximo implica um produto/espessura diferente do que a cor sugere —
-    pode ser o keynote errado (muito longe) ou um erro de desenho."""
+    """Para cada segmento, acha a tag de keynote mais próxima cujo PRODUTO
+    bate com o que a cor já indica (a cor é o filtro confiável de
+    produto/espessura — ver `extract_wall_linings_color_key`; o keynote só
+    refina dentro daquele produto, dizendo se é 1x ou 2x camada).
+
+    Isso importa em plantas densas (várias salas pequenas perto uma da
+    outra): sem esse filtro, o "keynote mais próximo" às vezes pertence à
+    parede vizinha, de outro produto — contaminando o resultado com camadas
+    erradas. Só quando não existe NENHUM keynote do produto certo por perto
+    é que caímos para "color_only" (1 camada assumida, sinalizado como
+    risco) — nunca pegamos emprestado o keynote de outro produto.
+    """
     max_dist_pt = max_match_dist_m / scale_m_per_unit if scale_m_per_unit else float("inf")
     tag_points = [
         (code, ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2))
@@ -242,31 +249,39 @@ def match_segments_to_keynotes(
 
     results: list[MatchedSegment] = []
     for seg in segments:
-        best_code = None
-        best_dist = float("inf")
-        for code, (tx, ty) in tag_points:
-            dist = ((seg.midpoint[0] - tx) ** 2 + (seg.midpoint[1] - ty) ** 2) ** 0.5
-            if dist < best_dist:
-                best_dist = dist
-                best_code = code
-
         length_m = seg.length_pt * scale_m_per_unit
         color_spec = color_key.get(seg.color, "NOT_IN_KEY")
+        wanted_product = color_spec.product if isinstance(color_spec, BoardSpec) else None
 
-        if best_code is not None and best_dist <= max_dist_pt:
-            keynote_spec = legend.get(best_code)
-            mismatch = False
-            if keynote_spec is not None and isinstance(color_spec, BoardSpec):
-                mismatch = keynote_spec.product != color_spec.product
+        best_code = None
+        best_dist = float("inf")
+        fallback_code = None
+        fallback_dist = float("inf")
+        for code, (tx, ty) in tag_points:
+            dist = ((seg.midpoint[0] - tx) ** 2 + (seg.midpoint[1] - ty) ** 2) ** 0.5
+            if dist > max_dist_pt:
+                continue
+            keynote_spec = legend.get(code)
+            if keynote_spec is None:
+                continue
+            if wanted_product is not None and keynote_spec.product == wanted_product:
+                if dist < best_dist:
+                    best_dist = dist
+                    best_code = code
+            elif dist < fallback_dist:
+                fallback_dist = dist
+                fallback_code = code
+
+        if best_code is not None:
             results.append(
                 MatchedSegment(
                     color=seg.color,
                     length_m=length_m,
-                    board_spec=keynote_spec,
+                    board_spec=legend[best_code],
                     source="keynote",
                     keynote_code=best_code,
                     keynote_dist_m=best_dist * scale_m_per_unit,
-                    color_spec_mismatch=mismatch,
+                    color_spec_mismatch=False,
                 )
             )
         elif color_spec != "NOT_IN_KEY":
@@ -276,6 +291,20 @@ def match_segments_to_keynotes(
                     length_m=length_m,
                     board_spec=color_spec,
                     source="color_only",
+                )
+            )
+        elif fallback_code is not None:
+            # cor nao mapeada, mas existe um keynote perto de outro produto --
+            # ainda melhor que nada, mas fica marcado como divergente.
+            results.append(
+                MatchedSegment(
+                    color=seg.color,
+                    length_m=length_m,
+                    board_spec=legend[fallback_code],
+                    source="keynote",
+                    keynote_code=fallback_code,
+                    keynote_dist_m=fallback_dist * scale_m_per_unit,
+                    color_spec_mismatch=True,
                 )
             )
         else:
