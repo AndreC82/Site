@@ -30,6 +30,23 @@ arraste ela de volta na seção **"Já ajustei a planilha de entrada"** da
 mesma página, pra gerar o orçamento final — sem precisar do terminal pra
 esse passo também.
 
+**Se o programa não achar a legenda de GIB sozinho** (formato de planta não
+reconhecido, texto dentro de uma tabela/imagem, etc.), tem uma caixa
+"Informações adicionais" no formulário de upload onde dá pra colar o texto
+da legenda (ou digitar a definição, ex. "GBTLIC60 = 2 camadas de 10mm
+Noiseline cada lado") — esse texto entra na mesma leitura determinística já
+usada pro resto da planta, sem precisar editar código. Depois de já ter
+processado uma vez, o mesmo campo também aparece em "Faltou alguma
+informação? Adicione e reprocesse", pra completar sem reenviar o PDF.
+
+**Convenções de desenho reconhecidas automaticamente:** o extrator tenta,
+nesta ordem, (1) ambiente reconstruído + perímetro (paredes finas, texto
+"Ceiling Linings N"/"Use GBxxx..."), (2) linha colorida + keynote próximo
+("Wall Linings Plan", ver seção abaixo), e (3) parede em preenchimento
+sólido colorido (comprimento medido automaticamente, mas o tipo de chapa de
+cada cor precisa ser confirmado à mão — sem legenda confiável de ler nesse
+formato). Teto só é detectado automaticamente pelo método (1).
+
 ## Wall Linings Plan (parede colorida por tipo + keynote) + relatório de risco bilíngue
 
 Algumas pranchas usam outra convenção: cada trecho de parede é uma **linha

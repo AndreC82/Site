@@ -117,7 +117,18 @@ _PAGE = """
     <p id="filename"></p>
     <input type="file" id="fileInput" name="pdf" accept="application/pdf" required>
   </div>
-  <button type="submit" id="submitBtn" disabled>Processar</button>
+  <label for="hints" style="display:block; margin-top:16px; font-weight:bold;">
+    Informações adicionais (opcional)
+  </label>
+  <p style="color:#555; font-size:0.9rem; margin:4px 0 8px;">
+    Se o programa não achar a legenda de GIB sozinho, cole o texto dela aqui (ex.: copiado da
+    página onde ela está), ou digite a definição direto — ex. "GBTLIC60 = 2 camadas de 10mm
+    Noiseline cada lado" ou "a legenda de teto está na página 7".
+  </label>
+  <textarea id="hints" name="hints" rows="4" style="width:100%; padding:8px; box-sizing:border-box; font-family:inherit;"></textarea>
+  <div style="margin-top:12px;">
+    <button type="submit" id="submitBtn" disabled>Processar</button>
+  </div>
   <div id="status"></div>
 </form>
 
@@ -134,6 +145,16 @@ _PAGE = """
   <a class="download" href="/baixar/{{ result.job_id }}/conferencia.pdf">⬇ Baixar PDF de conferência</a>
   <p>Abra a planilha, compare com o PDF de conferência, e ajuste qualquer linha que estiver
   errada (metros lineares, tipo de chapa, taxas). Depois use o formulário abaixo pra gerar o orçamento final.</p>
+
+  <details style="margin-top:16px;">
+    <summary style="cursor:pointer; font-weight:bold;">Faltou alguma informação? Adicione e reprocesse</summary>
+    <form method="post" action="/reprocessar" style="margin-top:10px;">
+      <input type="hidden" name="job_id" value="{{ result.job_id }}">
+      <textarea name="hints" rows="4" style="width:100%; padding:8px; box-sizing:border-box; font-family:inherit;"
+        placeholder='Cole aqui a legenda de GIB que faltou, ou digite ex.: &quot;a legenda de teto está na página 7&quot;'></textarea>
+      <div style="margin-top:10px;"><button type="submit">Reprocessar com essa informação</button></div>
+    </form>
+  </details>
 </div>
 {% endif %}
 
@@ -176,6 +197,44 @@ def index():
     return _render(result=None, questions=None, orcamento=None)
 
 
+def _read_hints(job_dir: Path) -> str:
+    hints_path = job_dir / "hints.txt"
+    return hints_path.read_text(encoding="utf-8") if hints_path.exists() else ""
+
+
+def _append_hints(job_dir: Path, new_text: str) -> None:
+    new_text = (new_text or "").strip()
+    if not new_text:
+        return
+    existing = _read_hints(job_dir)
+    combined = f"{existing}\n{new_text}".strip() if existing else new_text
+    (job_dir / "hints.txt").write_text(combined, encoding="utf-8")
+
+
+def _read_height_overrides(job_dir: Path) -> dict[str, float]:
+    path = job_dir / "alturas.txt"
+    if not path.exists():
+        return {}
+    overrides = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "\t" not in line:
+            continue
+        level, value = line.split("\t", 1)
+        try:
+            overrides[level] = float(value)
+        except ValueError:
+            pass
+    return overrides
+
+
+def _save_height_overrides(job_dir: Path, overrides: dict[str, float]) -> None:
+    if not overrides:
+        return
+    combined = {**_read_height_overrides(job_dir), **overrides}
+    lines = [f"{level}\t{height}" for level, height in combined.items()]
+    (job_dir / "alturas.txt").write_text("\n".join(lines), encoding="utf-8")
+
+
 @app.route("/processar", methods=["POST"])
 def processar():
     uploaded = request.files.get("pdf")
@@ -189,6 +248,7 @@ def processar():
     pdf_path = job_dir / "planta.pdf"
     uploaded.save(pdf_path)
     (job_dir / "nome.txt").write_text(uploaded.filename, encoding="utf-8")
+    _append_hints(job_dir, request.form.get("hints", ""))
 
     return _finish_analysis(job_id, str(pdf_path), height_overrides=None)
 
@@ -209,13 +269,28 @@ def completar():
                 overrides[level] = float(value.replace(",", "."))
             except ValueError:
                 pass
+    _save_height_overrides(job_dir, overrides)
 
     return _finish_analysis(job_id, str(pdf_path), height_overrides=overrides)
 
 
+@app.route("/reprocessar", methods=["POST"])
+def reprocessar():
+    job_id = request.form.get("job_id", "")
+    job_dir = _JOBS_DIR / job_id
+    pdf_path = job_dir / "planta.pdf"
+    if not pdf_path.exists():
+        return "Sessão expirou — reenvie o PDF.", 404
+
+    _append_hints(job_dir, request.form.get("hints", ""))
+    return _finish_analysis(job_id, str(pdf_path), height_overrides=None)
+
+
 def _finish_analysis(job_id: str, pdf_path: str, height_overrides: dict[str, float] | None):
     job_dir = _JOBS_DIR / job_id
-    result = analyze_pdf(pdf_path, height_overrides=height_overrides)
+    extra_text = _read_hints(job_dir)
+    combined_overrides = {**_read_height_overrides(job_dir), **(height_overrides or {})}
+    result = analyze_pdf(pdf_path, height_overrides=combined_overrides, extra_text=extra_text)
 
     if result.levels_missing_height:
         pdf_name = (job_dir / "nome.txt").read_text(encoding="utf-8") if (job_dir / "nome.txt").exists() else "o PDF"

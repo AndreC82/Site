@@ -158,7 +158,8 @@ def _fallback_height_for_page(
 
 
 def _try_wall_linings_plan_fallback(
-    doc: "fitz.Document", pages_text: list[str], result: AnalysisResult, height_overrides: dict[str, float]
+    doc: "fitz.Document", pages_text: list[str], result: AnalysisResult, height_overrides: dict[str, float],
+    extra_text: str = "",
 ) -> bool:
     """Tenta a convenção "Wall Linings Plan" (trecho de parede = linha fina
     colorida, tipo/camadas confirmados por keynote próximo -- ver
@@ -176,7 +177,7 @@ def _try_wall_linings_plan_fallback(
         segments = extract_colored_wall_segments(page)
         if not segments:
             continue
-        legend = parse_keynote_legend(text)
+        legend = parse_keynote_legend(text + ("\n" + extra_text if extra_text else ""))
         color_key = extract_wall_linings_color_key(page)
         tags = find_placed_keynote_tags(page, legend)
         matched = match_segments_to_keynotes(segments, tags, legend, color_key, scale)
@@ -258,17 +259,28 @@ def _try_filled_rect_fallback(
     return found_any
 
 
-def analyze_pdf(pdf_path: str, height_overrides: dict[str, float] | None = None) -> AnalysisResult:
+def analyze_pdf(
+    pdf_path: str,
+    height_overrides: dict[str, float] | None = None,
+    extra_text: str = "",
+) -> AnalysisResult:
     """height_overrides: {"Lower": 2.7, "Upper": 2.55, ...} — usado quando a
     altura de pé-direito não foi encontrada na planta pra um nível (veja
     `AnalysisResult.levels_missing_height`); passe os valores que o usuário
     informou manualmente pra completar a análise sem precisar adivinhar.
+
+    extra_text: texto que o usuário colou/digitou na tela (ex.: a legenda de
+    GIB copiada da própria planta, quando ela não foi extraída/reconhecida
+    automaticamente) — some ao texto de cada prancha antes de rodar os
+    mesmos leitores de legenda já usados no resto do módulo, então funciona
+    com qualquer formato que eles já entendam, sem precisar de código novo.
     """
     height_overrides = height_overrides or {}
+    extra_text = extra_text or ""
     doc = fitz.open(pdf_path)
     pages = extract_pdf(pdf_path)
     pages_text = [doc[i].get_text() for i in range(len(doc))]
-    full_text = "\n".join(pages_text)
+    full_text = "\n".join(pages_text) + ("\n" + extra_text if extra_text else "")
 
     result = AnalysisResult()
 
@@ -320,7 +332,7 @@ def analyze_pdf(pdf_path: str, height_overrides: dict[str, float] | None = None)
             floor_plan_rooms.setdefault(level, []).append(room)
 
     if not floor_plan_rooms:
-        if not _try_wall_linings_plan_fallback(doc, pages_text, result, height_overrides):
+        if not _try_wall_linings_plan_fallback(doc, pages_text, result, height_overrides, extra_text):
             _try_filled_rect_fallback(doc, pages, pages_text, result, height_overrides)
         if not result.wall_rows:
             result.warnings.append(
