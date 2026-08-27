@@ -14,7 +14,9 @@ Depois abra http://localhost:5000 no navegador.
 from __future__ import annotations
 
 import tempfile
+import threading
 import uuid
+import webbrowser
 from pathlib import Path
 
 from flask import Flask, render_template_string, request, send_file
@@ -277,7 +279,10 @@ def baixar(job_id: str, filename: str):
 
 
 def main() -> int:
-    print("Abra http://localhost:5000 no navegador para enviar a planta.")
+    url = "http://127.0.0.1:5000"
+    print(f"Abra {url} no navegador para enviar a planta.")
+    print("(O navegador deve abrir sozinho em alguns segundos. Deixe esta janela aberta.)")
+    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     app.run(host="127.0.0.1", port=5000, debug=False)
     return 0
 
