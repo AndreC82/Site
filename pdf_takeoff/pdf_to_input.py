@@ -32,6 +32,15 @@ from .gib_spec_extract import (
     extract_wall_default,
 )
 from .input_template import generate_blank_input
+from .wall_linings_plan import (
+    detect_filled_wall_groups,
+    extract_colored_wall_segments,
+    extract_scale_m_per_unit as _wl_extract_scale,
+    extract_wall_linings_color_key,
+    find_placed_keynote_tags,
+    match_segments_to_keynotes,
+    parse_keynote_legend,
+)
 
 _WET_KEYWORDS = {"vinyl", "wc", "kitchen", "bath", "shower", "laundry", "sink", "servery"}
 _LABEL_IGNORE_RE = re.compile(r"^[\d.,/\-x×ø]+$", re.IGNORECASE)
@@ -63,6 +72,13 @@ class AnalysisResult:
     # Níveis (ex.: "Lower", "Upper") em que não achamos a altura de pé-direito
     # na planta e por isso precisamos perguntar pro usuário.
     levels_missing_height: set[str] = field(default_factory=set)
+    # Preenchido só quando a convenção de "ambiente + perímetro" (GB-code)
+    # não achou nada e um método alternativo (wall-linings-plan colorido, ou
+    # parede em preenchimento sólido) foi usado em vez disso -- cada linha já
+    # pronta pra ir direto na aba Paredes: (grupo, altura_m, descrição,
+    # tipo_de_chapa, camadas, metros_lineares).
+    wall_rows: list[tuple[str, float, str, str, int, float]] = field(default_factory=list)
+    method: str = "room-perimeter"
 
 
 def _room_label(polygon, words: list[TextWord]) -> str:
@@ -117,6 +133,129 @@ def _reconstruct_rooms(page: PageContent, page_text: str) -> tuple[list, float]:
     polys = filter_title_block_noise(polys, page.width, page.height, scale, page.words)
     polys = exclude_exterior_areas(polys, page.words)
     return polys, scale
+
+
+def _fallback_height_for_page(
+    text: str, page_no: int, result: AnalysisResult, height_overrides: dict[str, float]
+) -> tuple[str, float | None]:
+    """Mesma lógica de altura-por-nível usada no método principal (procura
+    'FCL'/altura de pé-direito no texto da própria prancha; se não achar,
+    usa o valor que o usuário informou na tela, ou marca o nível como
+    pendente pra perguntar), mas com uma chave de nível que funciona mesmo
+    sem o texto '(Lower|Upper|...) Floor Plan' -- as pranchas nos métodos
+    alternativos abaixo nem sempre seguem essa convenção de título."""
+    level = _page_level(text)
+    if level == "Default":
+        level = f"Página {page_no + 1}"
+    if level not in result.height_by_level:
+        height_m = extract_stud_height_m(text) or height_overrides.get(level)
+        if height_m:
+            result.height_by_level[level] = height_m
+            result.levels_missing_height.discard(level)
+        else:
+            result.levels_missing_height.add(level)
+    return level, result.height_by_level.get(level)
+
+
+def _try_wall_linings_plan_fallback(
+    doc: "fitz.Document", pages_text: list[str], result: AnalysisResult, height_overrides: dict[str, float]
+) -> bool:
+    """Tenta a convenção "Wall Linings Plan" (trecho de parede = linha fina
+    colorida, tipo/camadas confirmados por keynote próximo -- ver
+    `wall_linings_plan.py`). Usada quando a convenção de ambiente+perímetro
+    não achou nada; varre todas as páginas, porque não há como saber de
+    antemão quais são as pranchas de parede nesse formato. Devolve True se
+    achou pelo menos um trecho de parede em alguma página (e já preenche
+    `result.wall_rows`/avisos nesse caso)."""
+    found_any = False
+    for i, text in enumerate(pages_text):
+        scale = _wl_extract_scale(text)
+        if scale is None:
+            continue
+        page = doc[i]
+        segments = extract_colored_wall_segments(page)
+        if not segments:
+            continue
+        legend = parse_keynote_legend(text)
+        color_key = extract_wall_linings_color_key(page)
+        tags = find_placed_keynote_tags(page, legend)
+        matched = match_segments_to_keynotes(segments, tags, legend, color_key, scale)
+        if not matched:
+            continue
+        level, height = _fallback_height_for_page(text, i, result, height_overrides)
+        totals: dict[tuple[str, int], float] = {}
+        unmapped_len = 0.0
+        for seg in matched:
+            if seg.board_spec is None:
+                unmapped_len += seg.length_m
+                continue
+            key = (seg.board_spec.board_type_label, seg.board_spec.layers)
+            totals[key] = totals.get(key, 0.0) + seg.length_m
+        for (board_label, layers), length_m in totals.items():
+            if length_m <= 0:
+                continue
+            found_any = True
+            result.wall_rows.append((
+                f"{level} {height or 0:.2f}m", height or 0.0,
+                f"Wall Linings Plan pág.{i + 1} - {board_label}",
+                board_label, layers, round(length_m, 1),
+            ))
+        if unmapped_len > 0:
+            found_any = True
+            result.wall_rows.append((
+                f"{level} {height or 0:.2f}m", height or 0.0,
+                f"Wall Linings Plan pág.{i + 1} - cor não identificada (CONFERIR tipo de chapa)",
+                "10mm Standard", 1, round(unmapped_len, 1),
+            ))
+    if found_any:
+        result.method = "wall-linings-plan"
+        result.warnings.append(
+            "Não achei o padrão de 'ambiente + perímetro' nesta planta — usei o padrão de 'Wall Linings "
+            "Plan' (linha colorida + keynote) em vez disso. Confira com atenção as linhas marcadas 'CONFERIR' "
+            "e o tipo de chapa de cada linha antes de fechar o orçamento; teto não é detectado por este método."
+        )
+    return found_any
+
+
+def _try_filled_rect_fallback(
+    doc: "fitz.Document", pages: list[PageContent], pages_text: list[str], result: AnalysisResult,
+    height_overrides: dict[str, float],
+) -> bool:
+    """Tenta a convenção de parede desenhada como retângulo de preenchimento
+    sólido colorido (ver `detect_filled_wall_groups`). Diferente do método
+    acima, aqui não há keynote nem legenda confiável de ler de forma
+    genérica -- por isso cada grupo vira uma linha "CONFERIR" pedindo pra
+    confirmar manualmente o tipo de chapa daquela cor. Ainda assim é melhor
+    que devolver zero: dá o comprimento medido, só falta o nome do produto."""
+    found_any = False
+    for i, text in enumerate(pages_text):
+        if not _looks_like_whole_building_plan(text):
+            continue
+        scale, confident = _page_scale(text, pages[i])
+        if not scale:
+            continue
+        groups = detect_filled_wall_groups(doc[i], scale)
+        if not groups:
+            continue
+        level, height = _fallback_height_for_page(text, i, result, height_overrides)
+        for g in groups:
+            found_any = True
+            color_hex = "#%02X%02X%02X" % tuple(round(c * 255) for c in g.color)
+            result.wall_rows.append((
+                f"{level} {height or 0:.2f}m", height or 0.0,
+                f"Preenchimento pág.{i + 1} - cor {color_hex}, {g.thickness_mm:.0f}mm (CONFERIR tipo de chapa)",
+                f"{round(g.thickness_mm / 5) * 5}mm Standard", 1, g.length_m,
+            ))
+    if found_any:
+        result.method = "filled-rect"
+        result.warnings.append(
+            "Não achei o padrão de 'ambiente + perímetro' nem de 'Wall Linings Plan' nesta planta — as paredes "
+            "parecem desenhadas como preenchimento sólido colorido. Medi o comprimento de cada cor/espessura, "
+            "mas NÃO consigo identificar o produto GIB de cada cor automaticamente nesse formato — confira e "
+            "corrija a coluna 'Tipo de chapa' de cada linha marcada 'CONFERIR' antes de fechar o orçamento; "
+            "teto também não é detectado por este método."
+        )
+    return found_any
 
 
 def analyze_pdf(pdf_path: str, height_overrides: dict[str, float] | None = None) -> AnalysisResult:
@@ -181,9 +320,14 @@ def analyze_pdf(pdf_path: str, height_overrides: dict[str, float] | None = None)
             floor_plan_rooms.setdefault(level, []).append(room)
 
     if not floor_plan_rooms:
-        result.warnings.append(
-            "Não consegui identificar nenhuma prancha de 'Floor Plan' com ambientes reconhecíveis."
-        )
+        if not _try_wall_linings_plan_fallback(doc, pages_text, result, height_overrides):
+            _try_filled_rect_fallback(doc, pages, pages_text, result, height_overrides)
+        if not result.wall_rows:
+            result.warnings.append(
+                "Não consegui identificar nenhuma prancha de 'Floor Plan' com ambientes reconhecíveis, nem "
+                "o padrão de 'Wall Linings Plan' colorido, nem parede em preenchimento sólido. Este PDF pode "
+                "usar uma convenção de desenho ainda não suportada — envie-o para revisão."
+            )
 
     # -- tetos: outras pranchas (plano de teto, incêndio) usam as MESMAS
     # coordenadas da planta de piso (mesmo edifício redesenhado) — em vez de
@@ -257,20 +401,33 @@ def write_prefilled_input(result: AnalysisResult, output_path: str) -> None:
 
     paredes = wb["Paredes"]
     row = 5
-    for room in result.rooms:
-        if room.perimeter_m <= 0:
-            continue
-        height = result.height_by_level.get(room.level) or next(iter(result.height_by_level.values()), 2.7)
-        spec = _wall_board_type(room, full_text_default, wet_default)
-        group_name = f"{room.level} {height:.2f}m"
-        paredes.cell(row=row, column=1, value=group_name)
-        paredes.cell(row=row, column=2, value=round(height, 2))
-        paredes.cell(row=row, column=3, value=f"{room.label} ({room.level} pág.{room.page_number})")
-        board_label = spec.board_type_label if spec.is_known_board_type else full_text_default.board_type_label
-        paredes.cell(row=row, column=4, value=board_label)
-        paredes.cell(row=row, column=5, value=spec.layers)
-        paredes.cell(row=row, column=6, value=round(room.perimeter_m, 1))
-        row += 1
+    if result.rooms:
+        for room in result.rooms:
+            if room.perimeter_m <= 0:
+                continue
+            height = result.height_by_level.get(room.level) or next(iter(result.height_by_level.values()), 2.7)
+            spec = _wall_board_type(room, full_text_default, wet_default)
+            group_name = f"{room.level} {height:.2f}m"
+            paredes.cell(row=row, column=1, value=group_name)
+            paredes.cell(row=row, column=2, value=round(height, 2))
+            paredes.cell(row=row, column=3, value=f"{room.label} ({room.level} pág.{room.page_number})")
+            board_label = spec.board_type_label if spec.is_known_board_type else full_text_default.board_type_label
+            paredes.cell(row=row, column=4, value=board_label)
+            paredes.cell(row=row, column=5, value=spec.layers)
+            paredes.cell(row=row, column=6, value=round(room.perimeter_m, 1))
+            row += 1
+    else:
+        # Sem ambientes detectados (método principal não achou nada) -- usa
+        # as linhas já prontas de um método alternativo (wall-linings-plan
+        # ou preenchimento sólido), se algum tiver funcionado.
+        for group_name, height, desc, board_label, layers, qty_m in result.wall_rows:
+            paredes.cell(row=row, column=1, value=group_name)
+            paredes.cell(row=row, column=2, value=round(height, 2) if height else None)
+            paredes.cell(row=row, column=3, value=desc)
+            paredes.cell(row=row, column=4, value=board_label)
+            paredes.cell(row=row, column=5, value=layers)
+            paredes.cell(row=row, column=6, value=qty_m)
+            row += 1
 
     tetos = wb["Tetos"]
     row = 7

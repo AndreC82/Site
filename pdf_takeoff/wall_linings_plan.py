@@ -211,6 +211,102 @@ def extract_colored_wall_segments(
 
 
 @dataclass
+class FilledWallGroup:
+    """Um grupo de paredes desenhadas como preenchimento sólido colorido
+    (retângulo cheio), agrupadas por cor + espessura -- convenção usada em
+    algumas pranchas (ex. quando cada tipo de parede vira um bloco cheio, em
+    vez de uma linha fina). Diferente de `MatchedSegment`, aqui não
+    identificamos o produto GIB automaticamente (o texto de legenda dessas
+    pranchas varia demais entre escritórios pra confiar numa leitura
+    genérica) -- só o comprimento por cor/espessura, para conferência manual
+    do tipo de chapa."""
+
+    color: tuple[float, float, float]
+    thickness_mm: float
+    length_m: float
+    n_segments: int
+
+
+_MIN_WALL_THICKNESS_MM = 60.0
+_MAX_WALL_THICKNESS_MM = 260.0
+_MIN_FILL_ASPECT_RATIO = 6.0
+_MIN_GROUP_LENGTH_M = 0.5
+_THICKNESS_CLUSTER_TOL_MM = 8.0
+
+
+def detect_filled_wall_groups(
+    page: "fitz.Page",
+    scale_m_per_unit: float,
+    min_thickness_mm: float = _MIN_WALL_THICKNESS_MM,
+    max_thickness_mm: float = _MAX_WALL_THICKNESS_MM,
+) -> list[FilledWallGroup]:
+    """Detecta paredes desenhadas como retângulo de preenchimento sólido
+    (não como linha fina) e agrupa por cor + espessura. Comprimento de cada
+    grupo = soma(área de cada retângulo) / espessura do grupo -- funciona
+    tanto pra um único retângulo longo quanto pra vários retângulos curtos
+    que formam o mesmo trecho de parede (comum quando a parede é desenhada
+    em pedaços, ex. interrompida por portas).
+
+    Filtra por: proporção comprimento/espessura mínima (`_MIN_FILL_ASPECT_RATIO`,
+    descarta preenchimentos "quadrados" -- mobília, ícones, hatching) e faixa
+    de espessura plausível para parede (`min_thickness_mm`..`max_thickness_mm`
+    -- descarta cotas, textos, tramas finas demais ou blocos grossos demais
+    pra ser parede). Não tenta identificar o produto/tipo de chapa pela cor
+    -- isso fica para conferência manual (ver aviso gerado por quem chama)."""
+    by_color: dict[tuple[float, float, float], list[tuple[float, float]]] = {}
+    for d in page.get_drawings():
+        fill = d.get("fill")
+        rect = d.get("rect")
+        if fill is None or rect is None:
+            continue
+        if all(c > 0.92 for c in fill):
+            continue  # branco/quase-branco: fundo, folha de porta, ícone -- não é parede
+        w, h = rect.width, rect.height
+        if w <= 0 or h <= 0:
+            continue
+        thin, long_ = (w, h) if w <= h else (h, w)
+        if thin <= 0 or long_ / thin < _MIN_FILL_ASPECT_RATIO:
+            continue
+        thickness_mm = thin * scale_m_per_unit * 1000
+        if not (min_thickness_mm <= thickness_mm <= max_thickness_mm):
+            continue
+        color = tuple(round(c, 3) for c in fill)
+        by_color.setdefault(color, []).append((w * h, thin))
+
+    groups: list[FilledWallGroup] = []
+    for color, entries in by_color.items():
+        # clustering 1D por proximidade de espessura (single-linkage): ordena
+        # pela espessura e corta o grupo sempre que o próximo valor estiver a
+        # mais de _THICKNESS_CLUSTER_TOL_MM do anterior -- evita que dois
+        # retângulos com a mesma espessura real caiam em grupos diferentes só
+        # por estarem perto de uma fronteira de arredondamento.
+        entries.sort(key=lambda e: e[1])
+        tol_pt = _THICKNESS_CLUSTER_TOL_MM / 1000 / scale_m_per_unit
+        clusters: list[list[tuple[float, float]]] = []
+        for area, thin in entries:
+            if clusters and thin - clusters[-1][-1][1] <= tol_pt:
+                clusters[-1].append((area, thin))
+            else:
+                clusters.append([(area, thin)])
+        for cluster in clusters:
+            total_area_pt2 = sum(a for a, _ in cluster)
+            avg_thin_pt = sum(t for _, t in cluster) / len(cluster)
+            thickness_m = avg_thin_pt * scale_m_per_unit
+            if thickness_m <= 0:
+                continue
+            length_m = (total_area_pt2 * scale_m_per_unit**2) / thickness_m
+            if length_m < _MIN_GROUP_LENGTH_M:
+                continue
+            groups.append(FilledWallGroup(
+                color=color,
+                thickness_mm=round(thickness_m * 1000, 1),
+                length_m=round(length_m, 2),
+                n_segments=len(cluster),
+            ))
+    return groups
+
+
+@dataclass
 class MatchedSegment:
     color: tuple[float, float, float]
     length_m: float

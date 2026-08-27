@@ -123,7 +123,7 @@ _PAGE = """
 
 {% if result %}
 <div class="result">
-  <p><strong>Pronto!</strong> {{ result.n_wall }} ambiente(s) com parede detectada, {{ result.n_ceiling }} com teto detectado.</p>
+  <p><strong>Pronto!</strong> {{ result.n_wall }} {{ result.wall_label }}, {{ result.n_ceiling }} {{ result.ceiling_label }}.</p>
   {% if result.warnings %}
   <div class="warn">
     <strong>Avisos:</strong>
@@ -234,8 +234,16 @@ def _finish_analysis(job_id: str, pdf_path: str, height_overrides: dict[str, flo
     write_prefilled_input(result, str(entrada_path))
     render_review_pdf(pdf_path, result, str(conferencia_path))
 
-    n_wall = sum(1 for r in result.rooms if r.perimeter_m > 0)
-    n_ceiling = sum(1 for r in result.rooms if r.ceiling_area_m2 > 0)
+    if result.method == "room-perimeter":
+        n_wall = sum(1 for r in result.rooms if r.perimeter_m > 0)
+        n_ceiling = sum(1 for r in result.rooms if r.ceiling_area_m2 > 0)
+        wall_label = "ambiente(s) com parede detectada"
+        ceiling_label = "com teto detectado"
+    else:
+        n_wall = len(result.wall_rows)
+        n_ceiling = 0
+        wall_label = "linha(s) de parede detectada(s) (método: " + result.method + ")"
+        ceiling_label = "com teto detectado — teto não é detectado por este método, adicione manualmente"
 
     return _render(
         questions=None,
@@ -244,6 +252,8 @@ def _finish_analysis(job_id: str, pdf_path: str, height_overrides: dict[str, flo
             "job_id": job_id,
             "n_wall": n_wall,
             "n_ceiling": n_ceiling,
+            "wall_label": wall_label,
+            "ceiling_label": ceiling_label,
             "warnings": result.warnings,
         },
     )

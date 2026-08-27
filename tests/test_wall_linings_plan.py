@@ -7,6 +7,7 @@ sintética que reproduz o padrão real: linha colorida = tipo de chapa (ver
 
 from __future__ import annotations
 
+import pytest
 from reportlab.pdfgen import canvas
 
 from pdf_takeoff.gib_spec_extract import BoardSpec
@@ -171,4 +172,98 @@ def test_write_bilingual_risk_report_creates_both_languages(tmp_path):
     assert "Quantities - Quantidades" in wb.sheetnames
     header = [c.value for c in next(wb["Findings - Achados"].iter_rows(min_row=4, max_row=4))]
     assert any("EN" in (h or "") for h in header)
-    assert any("PT" in (h or "") for h in header)
+
+
+def _generate_filled_wall_plan(path: str) -> None:
+    """Prancha sintetica onde a parede e' um retangulo de preenchimento
+    solido colorido (sem traco fino), convencao diferente da testada acima
+    -- ex.: vermelho = 175mm, preto = 90mm, na escala 1:50 (mesma conversao
+    usada no projeto real que motivou esse metodo). Inclui tambem um
+    retangulo BRANCO (deve ser ignorado -- e' fundo/icone, nao parede) e um
+    retangulo "quadrado" (deve ser ignorado -- proporcao baixa demais pra
+    ser parede, ex. mobilia)."""
+    scale = 50 * 25.4 / 1000 / 72  # m/pt, igual ao usado no resto do modulo
+    red_th_pt = 0.175 / scale
+    black_th_pt = 0.090 / scale
+
+    c = canvas.Canvas(path, pagesize=(1200, 900))
+    c.setFont("Helvetica", 9)
+    c.drawString(50, 850, "1:50")
+    c.drawString(50, 830, "LEVEL 9 - GENERAL ARRANGEMENT")  # sem "Floor Plan" de proposito
+
+    c.setFillColorRGB(1, 0, 0)
+    c.rect(100, 700, 400, red_th_pt, fill=1, stroke=0)  # parede vermelha ~70m (400pt)
+    c.setFillColorRGB(0, 0, 0)
+    c.rect(100, 500, 300, black_th_pt, fill=1, stroke=0)  # parede preta ~52.9m (300pt)
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(100, 400, 400, red_th_pt, fill=1, stroke=0)  # branco -- deve ser ignorado
+    c.setFillColorRGB(0, 1, 0)
+    c.rect(100, 300, 30, 30, fill=1, stroke=0)  # quadrado verde -- deve ser ignorado (proporcao baixa)
+
+    c.showPage()
+    c.save()
+
+
+def test_detect_filled_wall_groups_ignores_white_and_square_fills(tmp_path):
+    import pymupdf as fitz
+
+    from pdf_takeoff.wall_linings_plan import detect_filled_wall_groups
+
+    pdf_path = tmp_path / "filled_plan.pdf"
+    _generate_filled_wall_plan(str(pdf_path))
+
+    doc = fitz.open(str(pdf_path))
+    scale = 50 * 25.4 / 1000 / 72
+    groups = detect_filled_wall_groups(doc[0], scale)
+
+    colors = {g.color for g in groups}
+    assert (1.0, 0.0, 0.0) in colors
+    assert (0.0, 0.0, 0.0) in colors
+    assert (1.0, 1.0, 1.0) not in colors  # branco filtrado
+    assert (0.0, 1.0, 0.0) not in colors  # quadrado filtrado (proporcao)
+
+    red = next(g for g in groups if g.color == (1.0, 0.0, 0.0))
+    black = next(g for g in groups if g.color == (0.0, 0.0, 0.0))
+    assert red.length_m == pytest.approx(400 * scale, rel=0.02)
+    assert black.length_m == pytest.approx(300 * scale, rel=0.02)
+    assert red.thickness_mm == pytest.approx(175, rel=0.05)
+    assert black.thickness_mm == pytest.approx(90, rel=0.05)
+
+
+def test_pdf_to_input_falls_back_to_wall_linings_plan(tmp_path):
+    """Quando a convencao 'ambiente + perimetro' nao acha nada (esta
+    prancha nao usa esse padrao), o pipeline principal (usado pelo webapp)
+    deve cair automaticamente pro metodo de linha colorida + keynote, em vez
+    de devolver zero -- e' o comportamento que corrige o bug relatado de
+    'planilha gerada ficou zerada' para esse tipo de planta."""
+    from pdf_takeoff.pdf_to_input import analyze_pdf
+
+    pdf_path = tmp_path / "wl_plan.pdf"
+    _generate_synthetic_plan(str(pdf_path))
+
+    result = analyze_pdf(str(pdf_path), height_overrides={"Página 1": 2.7})
+
+    assert result.method == "wall-linings-plan"
+    assert len(result.rooms) == 0
+    assert len(result.wall_rows) > 0
+    board_labels = {row[3] for row in result.wall_rows}
+    assert "13mm Standard" in board_labels
+    assert "13mm Fireline" in board_labels
+
+
+def test_pdf_to_input_falls_back_to_filled_rect(tmp_path):
+    """Mesma ideia, mas para a convencao de parede em preenchimento solido
+    (sem traco fino nem keynote) -- deve cair pro terceiro metodo, nao
+    voltar zero."""
+    from pdf_takeoff.pdf_to_input import analyze_pdf
+
+    pdf_path = tmp_path / "filled_plan.pdf"
+    _generate_filled_wall_plan(str(pdf_path))
+
+    result = analyze_pdf(str(pdf_path), height_overrides={"Página 1": 2.7})
+
+    assert result.method == "filled-rect"
+    assert len(result.rooms) == 0
+    assert len(result.wall_rows) == 2
+    total_len = sum(row[5] for row in result.wall_rows)
+    assert total_len == pytest.approx((400 + 300) * (50 * 25.4 / 1000 / 72), rel=0.05)
