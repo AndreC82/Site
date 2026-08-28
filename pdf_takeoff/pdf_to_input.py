@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pymupdf as fitz
 from openpyxl.styles import Font
@@ -522,18 +523,58 @@ def main() -> int:
         "--review-pdf", dest="review_pdf", default=None,
         help="Se informado, gera também um PDF com o que foi detectado desenhado sobre a planta.",
     )
+    parser.add_argument(
+        "--altura", dest="alturas", action="append", default=[], metavar="NIVEL=METROS",
+        help="Altura de pé-direito pra um nível que não foi encontrado na planta "
+        "(ex.: --altura \"Página 1=2.7\"). Repita a flag pra mais de um nível.",
+    )
+    parser.add_argument(
+        "--info", dest="info", default=None,
+        help="Texto extra (legenda de GIB colada, definição de tipo de chapa, etc.) pra "
+        "completar o que não foi encontrado automaticamente na planta — mesmo campo da "
+        "caixa 'Informações adicionais' do webapp.",
+    )
+    parser.add_argument(
+        "--info-file", dest="info_file", default=None,
+        help="Como --info, mas lendo o texto de um arquivo (útil pra colar um bloco maior).",
+    )
     args = parser.parse_args()
 
-    result = analyze_pdf(args.pdf)
+    height_overrides = {}
+    for entry in args.alturas:
+        if "=" not in entry:
+            parser.error(f"--altura precisa ser NIVEL=METROS, recebi: {entry!r}")
+        level, value = entry.split("=", 1)
+        try:
+            height_overrides[level] = float(value.replace(",", "."))
+        except ValueError:
+            parser.error(f"altura inválida em --altura {entry!r}")
+
+    extra_text = args.info or ""
+    if args.info_file:
+        extra_text = (extra_text + "\n" + Path(args.info_file).read_text(encoding="utf-8")).strip()
+
+    result = analyze_pdf(args.pdf, height_overrides=height_overrides, extra_text=extra_text)
+
+    if result.levels_missing_height:
+        print(
+            "Não achei a altura de pé-direito pra: " + ", ".join(sorted(result.levels_missing_height)) + ".\n"
+            "Rode de novo passando --altura \"NIVEL=METROS\" pra cada um (ex.: --altura \"Página 1=2.7\")."
+        )
+        return 1
+
     write_prefilled_input(result, args.output)
     if args.review_pdf:
         render_review_pdf(args.pdf, result, args.review_pdf)
         print(f"PDF de conferência gerado em: {args.review_pdf}")
 
-    n_wall = sum(1 for r in result.rooms if r.perimeter_m > 0)
-    n_ceiling = sum(1 for r in result.rooms if r.ceiling_area_m2 > 0)
     print(f"Planilha de entrada pré-preenchida gerada em: {args.output}")
-    print(f"  {n_wall} ambiente(s) com parede detectada, {n_ceiling} com teto detectado.")
+    if result.method == "room-perimeter":
+        n_wall = sum(1 for r in result.rooms if r.perimeter_m > 0)
+        n_ceiling = sum(1 for r in result.rooms if r.ceiling_area_m2 > 0)
+        print(f"  {n_wall} ambiente(s) com parede detectada, {n_ceiling} com teto detectado.")
+    else:
+        print(f"  {len(result.wall_rows)} linha(s) de parede detectada(s) (método: {result.method}).")
     if result.warnings:
         print("  Avisos:")
         for w in result.warnings:
