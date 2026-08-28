@@ -46,6 +46,14 @@ from .wall_linings_plan import (
 _WET_KEYWORDS = {"vinyl", "wc", "kitchen", "bath", "shower", "laundry", "sink", "servery"}
 _LABEL_IGNORE_RE = re.compile(r"^[\d.,/\-x×ø]+$", re.IGNORECASE)
 _MIN_ROOM_AREA_M2 = 2.5
+# "Floor Plan" cobre a maioria dos projetos; "Floor Reference Plan" aparece em
+# alguns projetos residenciais (ex.: pranchas "GROUND FLOOR REFERENCE PLAN" /
+# "FIRST FLOOR REFERENCE PLAN") onde a prancha de layout de ambientes de
+# verdade não se chama so "Floor Plan". Não ampliar mais que isso (ex. um
+# wildcard "Floor.*Plan") -- pranchas tipo "GROUND FLOOR CONSTRUCTION SETOUT
+# PLAN" tem "Floor" e "Plan" na mesma prancha mas sao so cotas de setout, sem
+# ambiente/rotulo para reconstruir.
+_FLOOR_PLAN_TITLE_RE = re.compile(r"Floor\s+(?:Reference\s+)?Plan", re.IGNORECASE)
 _FIRE_MATCH_MAX_DIST_M = 5.0  # distância máxima entre o callout e o contorno do ambiente
 
 
@@ -124,7 +132,10 @@ def _looks_like_whole_building_plan(page_text: str) -> bool:
 
 
 def _page_level(page_text: str) -> str:
-    match = re.search(r"\b(Lower|Upper|Ground|First)\b\s+(?:Floor|Ceiling|Fire Control)\s+Plan", page_text, re.IGNORECASE)
+    match = re.search(
+        r"\b(Lower|Upper|Ground|First)\b\s+(?:Floor\s+(?:Reference\s+)?Plan|Ceiling\s+Plan|Fire Control\s+Plan)",
+        page_text, re.IGNORECASE,
+    )
     return match.group(1).title() if match else "Default"
 
 
@@ -298,7 +309,7 @@ def analyze_pdf(
     # -- paredes: reconstrói ambientes em cada prancha de planta de piso -----
     floor_plan_rooms: dict[str, list[DetectedRoom]] = {}
     for i, text in enumerate(pages_text):
-        if not re.search(r"Floor Plan", text, re.IGNORECASE) or re.search(r"Floor Plan\s*Dimensions", text, re.IGNORECASE):
+        if not _FLOOR_PLAN_TITLE_RE.search(text) or re.search(r"Floor Plan\s*Dimensions", text, re.IGNORECASE):
             continue
         if not _looks_like_whole_building_plan(text):
             continue
